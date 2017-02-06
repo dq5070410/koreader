@@ -1,17 +1,10 @@
 local InputContainer = require("ui/widget/container/inputcontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
-local InfoMessage = require("ui/widget/infomessage")
-local InputDialog = require("ui/widget/inputdialog")
-local ConfirmBox = require("ui/widget/confirmbox")
-local GestureRange = require("ui/gesturerange")
-local OTAManager = require("ui/otamanager")
 local UIManager = require("ui/uimanager")
 local Device = require("device")
-local Geom = require("ui/geometry")
+local Screensaver = require("ui/screensaver")
 local Event = require("ui/event")
 local Screen = require("device").screen
-local Language = require("ui/language")
-local DEBUG = require("dbg")
 local _ = require("gettext")
 
 local ReaderMenu = InputContainer:new{
@@ -21,67 +14,85 @@ local ReaderMenu = InputContainer:new{
 
 function ReaderMenu:init()
     self.tab_item_table = {
-        setting = {
-            icon = "resources/icons/appbar.settings.png",
-        },
         navi = {
             icon = "resources/icons/appbar.page.corner.bookmark.png",
         },
-        info = {
-            icon = "resources/icons/appbar.pokeball.png",
-        },
         typeset = {
             icon = "resources/icons/appbar.page.text.png",
+        },
+        setting = {
+            icon = "resources/icons/appbar.settings.png",
+        },
+        info = {
+            icon = "resources/icons/appbar.pokeball.png",
         },
         plugins = {
             icon = "resources/icons/appbar.tools.png",
         },
         filemanager = {
             icon = "resources/icons/appbar.cabinet.files.png",
+            remember = false,
             callback = function()
-                self.ui:onClose()
                 self:onTapCloseMenu()
-                -- screen orientation is independent for docview and filemanager
-                -- so we need to restore the screen mode for the filemanager
+                self.ui:onClose()
                 local FileManager = require("apps/filemanager/filemanager")
-                FileManager:restoreScreenMode()
-                if not FileManager.is_running then
-                    FileManager:showFiles()
+                local lastdir = nil
+                local last_file = G_reader_settings:readSetting("lastfile")
+                if last_file then
+                    lastdir = last_file:match("(.*)/")
+                end
+                if FileManager.instance then
+                    FileManager.instance:reinit(lastdir)
+                else
+                    FileManager:showFiles(lastdir)
                 end
             end,
         },
         home = {
             icon = "resources/icons/appbar.home.png",
+            remember = false,
             callback = function()
-                self.ui:onClose()
-                UIManager:quit()
+                self:onTapCloseMenu()
+                UIManager:scheduleIn(0.1, function() self.ui:onClose() end)
+                local FileManager = require("apps/filemanager/filemanager")
+                if FileManager.instance then
+                    FileManager.instance:onClose()
+                end
             end,
         },
     }
     self.registered_widgets = {}
 
     if Device:hasKeys() then
-        self.key_events = {
-            ShowReaderMenu = { { "Menu" }, doc = "show menu" },
-            Close = { { "Back" }, doc = "close menu" },
-        }
+        self.key_events = { Close = { { "Back" }, doc = "close menu" }, }
+        if Device:isTouchDevice() then
+            self.key_events.TapShowMenu = { { "Menu" }, doc = "show menu", }
+        else
+            -- map menu key to only top menu because bottom menu is only
+            -- designed for touch devices
+            self.key_events.ShowReaderMenu = { { "Menu" }, doc = "show menu", }
+        end
     end
 end
 
-function ReaderMenu:initGesListener()
-    self.ges_events = {
-        TapShowMenu = {
-            GestureRange:new{
-                ges = "tap",
-                range = Geom:new{
-                    x = Screen:getWidth()*DTAP_ZONE_MENU.x,
-                    y = Screen:getHeight()*DTAP_ZONE_MENU.y,
-                    w = Screen:getWidth()*DTAP_ZONE_MENU.w,
-                    h = Screen:getHeight()*DTAP_ZONE_MENU.h
-                }
-            }
+function ReaderMenu:onReaderReady()
+    -- deligate gesture listener to readerui
+    self.ges_events = {}
+    self.onGesture = nil
+    if not Device:isTouchDevice() then return end
+
+    self.ui:registerTouchZones({
+        {
+            id = "readermenu_tap",
+            ges = "tap",
+            screen_zone = {
+                ratio_x = DTAP_ZONE_MENU.x, ratio_y = DTAP_ZONE_MENU.y,
+                ratio_w = DTAP_ZONE_MENU.w, ratio_h = DTAP_ZONE_MENU.h,
+            },
+            overrides = { "tap_forward", "tap_backward", },
+            handler = function() return self:onTapShowMenu() end,
         },
-    }
+    })
 end
 
 function ReaderMenu:setUpdateItemTable()
@@ -89,81 +100,58 @@ function ReaderMenu:setUpdateItemTable()
         widget:addToMainMenu(self.tab_item_table)
     end
 
-    -- setting tab
-    table.insert(self.tab_item_table.setting, {
-        text = _("Screen settings"),
-        sub_item_table = {
-            require("ui/elements/screen_dpi_menu_table"),
-            require("ui/elements/screen_eink_opt_menu_table"),
-            UIManager:getRefreshMenuTable(),
-        },
-    })
-    table.insert(self.tab_item_table.setting, {
-        text = _("Night mode"),
-        checked_func = function() return G_reader_settings:readSetting("night_mode") end,
-        callback = function()
-            local night_mode = G_reader_settings:readSetting("night_mode") or false
-            Screen.bb:invert()
-            G_reader_settings:saveSetting("night_mode", not night_mode)
-        end
-    })
-    table.insert(self.tab_item_table.setting, Language:getLangMenuTable())
-    if self.ui.document.is_djvu then
-        table.insert(self.tab_item_table.setting, self.view:getRenderModeMenuTable())
+    -- settings tab
+    -- insert common settings
+    for i, common_setting in ipairs(require("ui/elements/common_settings_menu_table")) do
+        table.insert(self.tab_item_table.setting, common_setting)
     end
-    table.insert(self.tab_item_table.setting, {
-        text = _("Show advanced options"),
-        checked_func = function() return G_reader_settings:readSetting("show_advanced") end,
-        callback = function()
-            local show_advanced = G_reader_settings:readSetting("show_advanced") or false
-            G_reader_settings:saveSetting("show_advanced", not show_advanced)
-        end
-    })
+    -- insert DjVu render mode submenu just before the last entry (show advanced)
+    -- this is a bit of a hack
+    if self.ui.document.is_djvu then
+        table.insert(
+            self.tab_item_table.setting,
+            #self.tab_item_table.setting,
+            self.view:getRenderModeMenuTable())
+    end
 
     -- info tab
-    if Device:isKindle() or Device:isKobo() then
-        table.insert(self.tab_item_table.info, OTAManager:getOTAMenuTable())
+    -- insert common info
+    for i, common_setting in ipairs(require("ui/elements/common_info_menu_table")) do
+        table.insert(self.tab_item_table.info, common_setting)
     end
-    table.insert(self.tab_item_table.info, {
-        text = _("Version"),
-        callback = function()
-            UIManager:show(InfoMessage:new{
-                text = io.open("git-rev", "r"):read(),
-            })
-        end
-    })
-    table.insert(self.tab_item_table.info, {
-        text = _("Help"),
-        callback = function()
-            UIManager:show(InfoMessage:new{
-                text = _("Please report bugs to \nhttps://github.com/koreader/koreader/issues"),
-            })
-        end
-    })
 
-    if KOBO_SCREEN_SAVER_LAST_BOOK then
+    if Device:isKobo() and Screensaver:isUsingBookCover() then
         local excluded = function()
             return self.ui.doc_settings:readSetting("exclude_screensaver") or false
         end
         local proportional = function()
             return self.ui.doc_settings:readSetting("proportional_screensaver") or false
         end
-        table.insert(self.tab_item_table.typeset, {
-            text = "Screensaver",
+        table.insert(self.tab_item_table.setting, {
+            text = _("Screensaver"),
             sub_item_table = {
                 {
-                    text = _("Use this book's cover as screensaver"),
-                    checked_func = function() return not excluded() end,
+                    text = _("Exclude this book's cover from screensaver"),
+                    checked_func = excluded,
                     callback = function()
-                        self.ui.doc_settings:saveSetting("exclude_screensaver", not excluded())
+                        if excluded() then
+                            self.ui.doc_settings:delSetting("exclude_screensaver")
+                        else
+                            self.ui.doc_settings:saveSetting("exclude_screensaver", true)
+                        end
                         self.ui:saveSettings()
                     end
                 },
                 {
-                    text = _("Display proportional cover image in screensaver"),
-                    checked_func = function() return proportional() end,
+                    text = _("Auto stretch this book's cover image in screensaver"),
+                    checked_func = proportional,
                     callback = function()
-                        self.ui.doc_settings:saveSetting("proportional_screensaver", not proportional())
+                        if proportional() then
+                            self.ui.doc_settings:delSetting("proportional_screensaver")
+                        else
+                            self.ui.doc_settings:saveSetting(
+                                "proportional_screensaver", not proportional())
+                        end
                         self.ui:saveSettings()
                     end
                 }
@@ -182,11 +170,12 @@ function ReaderMenu:onShowReaderMenu()
         dimen = Screen:getSize(),
     }
 
-    local main_menu = nil
+    local main_menu
     if Device:isTouchDevice() then
         local TouchMenu = require("ui/widget/touchmenu")
         main_menu = TouchMenu:new{
             width = Screen:getWidth(),
+            last_index = self.last_tab_index,
             tab_item_table = {
                 self.tab_item_table.navi,
                 self.tab_item_table.typeset,
@@ -225,6 +214,8 @@ function ReaderMenu:onShowReaderMenu()
 end
 
 function ReaderMenu:onCloseReaderMenu()
+    self.last_tab_index = self.menu_container[1].last_index
+    self:onSaveSettings()
     UIManager:close(self.menu_container)
     return true
 end
@@ -240,14 +231,12 @@ function ReaderMenu:onTapCloseMenu()
     self.ui:handleEvent(Event:new("CloseConfigMenu"))
 end
 
-function ReaderMenu:onSetDimensions(dimen)
-    -- update listening according to new screen dimen
-    if Device:isTouchDevice() then
-        self:initGesListener()
-    end
+function ReaderMenu:onReadSettings(config)
+    self.last_tab_index = config:readSetting("readermenu_tab_index") or 1
 end
 
 function ReaderMenu:onSaveSettings()
+    self.ui.doc_settings:saveSetting("readermenu_tab_index", self.last_tab_index)
 end
 
 function ReaderMenu:registerToMainMenu(widget)

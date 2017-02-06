@@ -5,7 +5,6 @@ local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
 local GestureRange = require("ui/gesturerange")
 local Geom = require("ui/geometry")
-local Input = require("device").input
 local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
@@ -50,6 +49,18 @@ function ButtonDialog:init()
     }
 end
 
+function ButtonDialog:onShow()
+    UIManager:setDirty(self, function()
+        return "ui", self[1][1].dimen
+    end)
+end
+
+function ButtonDialog:onCloseWidget()
+    UIManager:setDirty(nil, function()
+        return "partial", self[1][1].dimen
+    end)
+end
+
 function ButtonDialog:onTapClose()
     UIManager:close(self)
     if self.tap_close_callback then
@@ -61,6 +72,11 @@ end
 function ButtonDialog:onClose()
     self:onTapClose()
     return true
+end
+
+function ButtonDialog:paintTo(...)
+    InputContainer.paintTo(self, ...)
+    self.dimen = self[1][1].dimen -- FrameContainer
 end
 
 return ButtonDialog

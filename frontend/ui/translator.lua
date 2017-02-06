@@ -1,5 +1,5 @@
-local JSON = require("JSON")
-local DEBUG = require("dbg")
+local JSON = require("json")
+local logger = require("logger")
 
 --[[
 -- Translate text using Google Translate.
@@ -52,25 +52,31 @@ function Translator:loadPage(target_lang, source_lang, text)
     request['url'] = url.build(parsed)
     request['method'] = 'GET'
     request['sink'] = ltn12.sink.table(sink)
-    DEBUG("request", request)
     http.TIMEOUT, https.TIMEOUT = 10, 10
     local httpRequest = parsed.scheme == 'http' and http.request or https.request
-    local code, headers, status = socket.skip(1, httpRequest(request))
+    -- first argument returned by skip is code
+    local _, headers, status = socket.skip(1, httpRequest(request))
 
     -- raise error message when network is unavailable
     if headers == nil then
         error("Network is unreachable")
     end
 
+    if status ~= "HTTP/1.1 200 OK" then
+        logger.warn("translator HTTP status not okay:", status)
+        return
+    end
+
     local content = table.concat(sink)
-    if content ~= "" then
-        local ok, result = pcall(JSON.decode, JSON, content)
+    if content ~= "" and string.sub(content, 1,1) == "{" then
+        local ok, result = pcall(JSON.decode, content)
         if ok and result then
-            --DEBUG("translate result", result)
             return result
         else
-            DEBUG("error:", result)
+            logger.warn("translator error:", result)
         end
+    else
+        logger.warn("not JSON in translator response:", content)
     end
 end
 
@@ -78,7 +84,7 @@ function Translator:detect(text)
     local result = self:loadPage("en", nil, text)
     if result then
         local src_lang = result.src
-        DEBUG("detected language:", src_lang)
+        logger.dbg("detected language:", src_lang)
         return src_lang
     else
         return self.default_lang

@@ -4,10 +4,13 @@
 KOReader
 ========
 
+[![Join the chat][gitter-badge]][gitter-link]
+
 KOReader is a document viewer application, originally created for Kindle
-e-ink readers. It currently runs on Kindle 5 (Touch), Kindle Paperwhite,
-Kobo and Android (2.3+) devices. Developers can also run Koreader emulator
-for development purpose on desktop PC with Linux or Windows operating system.
+e-ink readers. It currently runs on Kindle, Kobo, PocketBook, Ubuntu Touch
+and Android (2.3+) devices. Developers can also run KOReader emulator
+for development purpose on desktop PC with Linux and Windows and 
+Mac OSX (experimental for now).
 
 Main features for users
 -----------------------
@@ -41,7 +44,7 @@ Highlights for developers
   * running on multi-platform with only one code-base maintained
   * developing koreader in any editor without compilation
   * high runtime efficiency by LuaJIT acceleration
-  * light-weight widget toolkit for small memory footprint
+  * light-weight self-contained widget toolkit with small memory footprint
   * extensible with plugin system
 * interfaced backends for documents parsing and rendering
   * high quality document backend libraries like MuPDF, DjvuLibre and CREngine
@@ -49,7 +52,7 @@ Highlights for developers
 * in active development
   * contributed by developers around the world
   * continuous integration with Travis CI
-  * with unit tests and code coverage test
+  * with unit tests, static analysis and code coverage test
   * automatic release of nightly builds
 * free as in free speech
   * licensed under Affero GPL v3
@@ -61,65 +64,103 @@ more about this project.
 Building Prerequisites
 ======================
 
-Instructions about how to get and compile the source are intended for a linux
+These instructions for how to get and compile the source are intended for a Linux
 OS. Windows users are suggested to develop in a [Linux VM][linux-vm] or use Wubi.
 
-To get and compile the source you must have `patch`, `wget`, `unzip`, `git`, `autoconf`,
-`subversion` and `cmake` installed. Version of autoconf need to be greater than 2.64.
+To get and compile the source you must have `patch`, `wget`, `unzip`, `git`,
+`cmake` and `luarocks` installed, as well as a version of `autoconf`
+greater than 2.64. You also need `nasm` and of course a compiler like `gcc`
+or `clang`. If you want to cross-compile for other architectures, you need a proper
+cross-compile toolchain. Your GCC should be at least of version 4.7 for both native
+and cross compiling.
 
-Ubuntu users may need to run:
+Users of Debian and Ubuntu can install the required packages using:
 ```
-sudo apt-get install build-essential libtool gcc-multilib
+sudo apt-get install build-essential git patch wget unzip \
+gettext autoconf cmake libtool nasm luarocks \
+libssl-dev libffi-dev libsdl2-dev libc6-dev-i386 xutils-dev linux-libc-dev:i386 zlib1g:i386
 ```
 
 Cross compile toolchains are available for Ubuntu users through these commands:
 ```
 # for Kindle
 sudo apt-get install gcc-arm-linux-gnueabi g++-arm-linux-gnueabi
-# for Kobo
+# for Kobo and Ubuntu touch
 sudo apt-get install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
 # for Win32
 sudo apt-get install gcc-mingw-w64-i686 g++-mingw-w64-i686
 ```
 
-A recent version of Android SDK/NDK and `ant` are needed in order to build
-Koreader for Android devices.
+Packages pkg-config-arm-linux-gnueabihf and pkg-config-arm-linux-gnueabi may
+block you to build for Kobo or Kindle, remove them if you got ld error,
+`/usr/lib/gcc-cross/arm-linux-gnueabihf/4.8/../../../../arm-linux-gnueabihf/bin/
+ld: cannot find -lglib-2.0`
+
+Mac OSX users may need to install these tools:
 ```
-sudo apt-get install ant
+brew install nasm binutils libtool autoconf automake sdl2 lua51
+```
+
+A recent version of Android SDK (including platform support for API version 19)/NDK, `ant` and `openjdk-8-jdk` are needed
+in order to build KOReader for Android devices.
+
+Users of Debian first need to configure the `backports` repository:
+```
+sudo echo "deb http://ftp.debian.org/debian jessie-backports main" > /etc/apt/sources.list.d/backports.list
+sudo apt-get update
+```
+For both Ubuntu and Debian, install the packages:
+```
+sudo apt-get install ant openjdk-8-jdk
+```
+Users on Debian finally need to remove JRE version 7:
+```
+sudo apt-get remove openjdk-7-jre-headless
+```
+
+In order to build KOReader package for Ubuntu Touch, the `click` package management
+tool is needed, Ubuntu users can install it with:
+```
+sudo apt-get install click
 ```
 
 You might also need SDL library packages if you want to compile and run
-koreader on Linux PC. Fedora users can install `SDL` and `SDL-devel` package.
-Ubuntu users probably need to install `libsdl1.2-dev` package:
+KOReader on Linux PC. Fedora users can install `SDL` and `SDL-devel` package.
+Ubuntu users probably need to install `libsdl2-dev` package:
 
 Getting the source
-========
+==================
 
 ```
 git clone https://github.com/koreader/koreader.git
-cd koreader
-make fetchthirdparty
+cd koreader && ./kodev fetch-thirdparty
 ```
 
-Building & Running & Testing
-========
+Building, Running and Testing
+=============================
 
-For real eink devices
+For EReader devices (kindle, kobo, pocketbook, ubuntu-touch)
 ---------------------
 
 To build installable package for Kindle:
 ```
-make TARGET=kindle clean kindleupdate
+./kodev release kindle
 ```
 
 To build installable package for Kobo:
 ```
-make TARGET=kobo clean koboupdate
+./kodev release kobo
 ```
 
-To run, you must call the script `reader.lua`. Run it without arguments to see
-usage notes. Note that the script and the `luajit` binary must be in the same
-directory.
+To build installable package for PocketBook:
+```
+./kodev release pocketbook
+```
+
+To build installable package for Ubuntu Touch
+```
+./kodev release ubuntu-touch
+```
 
 You may checkout our [nightlybuild script][nb-script] to see how to build a
 package from scratch.
@@ -127,43 +168,46 @@ package from scratch.
 For Android devices
 -------------------
 
-Make sure the "android" and "ndk-build" tools are in your PATH variable
-and the NDK variable points to the root directory of the Android NDK.
+Make sure the "android" and "ndk-build" tools are in your PATH environment
+variable and the NDK variable points to the root directory of the Android NDK.
 
-First, run this command to make a standalone android cross compiling toolchain
-from NDK:
+Then, run this command to build installable package for Android:
 ```
-make android-toolchain
-```
-
-Then, build installable package for Android:
-```
-make TARGET=android clean androidupdate
+./kodev release android
 ```
 
-For emulating KOReader on Linux and Windows
+For emulating KOReader on Linux, Windows and Mac OSX
 -------------
 
-To build an emulator on current Linux machine just run:
+To build an emulator on current Linux or OSX machine:
 ```
-make clean && make
-```
-
-If you want to compile the emulator for Windows you need to run:
-```
-make TARGET=win32 clean && make TARGET=win32
+./kodev build
 ```
 
-To run koreader on your developing machine
-(you may need to change $(MACHINE) to the arch of your machine such as 'x86_64'):
+If you want to compile the emulator for Windows run:
 ```
-cd koreader-$(MACHINE)/koreader && ./reader.lua -d ../../test
+./kodev build win32
 ```
 
-To run unit tests in KOReader:
+To run KOReader on your developing machine:
 ```
-make test
+./kodev run
 ```
+
+To run unit tests:
+```
+./kodev test base
+./kodev test front
+```
+
+NOTE: Extra dependencies for tests: busted and ansicolors from luarocks
+
+To run Lua static analysis:
+```
+make static-check
+```
+
+NOTE: Extra dependencies for tests: luacheck from luarocks
 
 You may need to checkout the [travis config file][travis-conf] to setup up
 a proper testing environment. Briefly, you need to install `luarocks` and
@@ -185,15 +229,37 @@ modifications with kroeader frontend. NOTE: only support relative path for now.
 
 
 Translation
-========
+===========
 
 Please refer to [l10n's README][l10n-readme] to grab the latest translations
-from [the Koreader project on Transifex][koreader-transifex] with this command:
+from [the KOReader project on Transifex][koreader-transifex] with this command:
 ```
 make po
 ```
 If your language is not listed on the Transifex project, please don't hesitate
 to send a language request [here][koreader-transifex].
+
+Variables in translation
+-------
+
+Some strings contain variables that should remain unaltered in translation.
+For example:
+
+```lua
+The title of the book is %1 and its author is %2.
+```
+This might be displayed as:
+```lua
+The title of the book is The Republic and its author is Plato.
+```
+To aid localization the variables may be freely positioned:
+```lua
+De auteur van het boek is %2 en de titel is %1.
+```
+That would result in:
+```lua
+De auteur van het boek is Plato en de titel is The Republic.
+```
 
 Use ccache
 ==========
@@ -217,13 +283,15 @@ http://ccache.samba.org
 
 
 [base-readme]:https://github.com/koreader/koreader-base/blob/master/README.md
-[nb-script]:https://github.com/koreader/koreader-misc/blob/master/koreader-nightlybuild/koreader-nightlybuild.sh
-[travis-badge]:https://travis-ci.org/koreader/koreader.png?branch=master
+[nb-script]:https://gitlab.com/koreader/nightly-builds/blob/master/build_release.sh
+[travis-badge]:https://travis-ci.org/koreader/koreader.svg?branch=master
 [travis-link]:https://travis-ci.org/koreader/koreader
 [travis-conf]:https://github.com/koreader/koreader-base/blob/master/.travis.yml
 [linux-vm]:http://www.howtogeek.com/howto/11287/how-to-run-ubuntu-in-windows-7-with-vmware-player/
 [l10n-readme]:https://github.com/koreader/koreader/blob/master/l10n/README.md
 [koreader-transifex]:https://www.transifex.com/projects/p/koreader/
-[coverage-badge]:https://coveralls.io/repos/koreader/koreader/badge.png
-[coverage-link]:https://coveralls.io/r/koreader/koreader
+[coverage-badge]:https://coveralls.io/repos/github/koreader/koreader/badge.svg?branch=master
+[coverage-link]:https://coveralls.io/github/koreader/koreader?branch=master
 [licence-badge]:http://img.shields.io/badge/licence-AGPL-brightgreen.svg
+[gitter-badge]:https://badges.gitter.im/Join%20Chat.svg
+[gitter-link]:https://gitter.im/koreader/koreader?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge

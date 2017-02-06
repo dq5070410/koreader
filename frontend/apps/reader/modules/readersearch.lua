@@ -1,14 +1,12 @@
 local InputContainer = require("ui/widget/container/inputcontainer")
 local ButtonDialog = require("ui/widget/buttondialog")
 local UIManager = require("ui/uimanager")
-local Geom = require("ui/geometry")
-local Screen = require("ui/screen")
-local DEBUG = require("dbg")
+local logger = require("logger")
 local _ = require("gettext")
 
 local ReaderSearch = InputContainer:new{
     direction = 0, -- 0 for search forward, 1 for search backward
-    case_insensitive = 1, -- default to case insensitive
+    case_insensitive = true, -- default to case insensitive
 }
 
 function ReaderSearch:init()
@@ -29,11 +27,16 @@ function ReaderSearch:addToMainMenu(tab_item_table)
 end
 
 function ReaderSearch:onShowSearchDialog(text)
-    local do_search = function(search_func, text, param)
+    local do_search = function(search_func, _text, param)
         return function()
-            local res = search_func(self, text, param)
+            local res = search_func(self, _text, param)
             if res then
-                self.ui.link:onGotoLink(res[1].start)
+                if self.ui.document.info.has_pages then
+                    self.ui.link:onGotoLink({page = res.page - 1})
+                    self.view.highlight.temp[res.page] = res
+                else
+                    self.ui.link:onGotoLink(res[1].start)
+                end
             end
         end
     end
@@ -60,20 +63,24 @@ function ReaderSearch:onShowSearchDialog(text)
             }
         },
         tap_close_callback = function()
-            DEBUG("highlight clear")
+            logger.dbg("highlight clear")
             self.ui.highlight:clear()
         end,
     }
-    local res = do_search(self.searchFromCurrent, text, 0)()
+    do_search(self.searchFromCurrent, text, 0)()
     UIManager:show(self.search_dialog)
+    -- TODO: regional
     UIManager:setDirty(self.dialog, "partial")
     return true
 end
 
 function ReaderSearch:search(pattern, origin)
+    logger.dbg("search pattern", pattern)
+    if pattern == nil or pattern == '' then return end
     local direction = self.direction
     local case = self.case_insensitive
-    return self.ui.document:findText(pattern, origin, direction, case)
+    local page = self.view.state.page
+    return self.ui.document:findText(pattern, origin, direction, case, page)
 end
 
 function ReaderSearch:searchFromStart(pattern)

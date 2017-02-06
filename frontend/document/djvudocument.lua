@@ -1,10 +1,6 @@
-local Geom = require("ui/geometry")
-local Cache = require("cache")
-local CacheItem = require("cacheitem")
 local KoptOptions = require("ui/data/koptoptions")
 local Document = require("document/document")
 local DrawContext = require("ffi/drawcontext")
-local Configurable = require("configurable")
 
 local DjvuDocument = Document:new{
     _document = false,
@@ -18,7 +14,7 @@ local DjvuDocument = Document:new{
 
 -- check DjVu magic string to validate
 local function validDjvuFile(filename)
-    f = io.open(filename, "r")
+    local f = io.open(filename, "r")
     if not f then return false end
     local magic = f:read(8)
     f:close()
@@ -43,6 +39,14 @@ function DjvuDocument:init()
     self.info.has_pages = true
     self.info.configurable = true
     self:_readMetadata()
+end
+
+function DjvuDocument:getProps()
+    local _, _, docname = self.file:find(".*/(.*)")
+    docname = docname or self.file
+    return {
+        title = docname:match("(.*)%.")
+    }
 end
 
 function DjvuDocument:getPageTextBoxes(pageno)
@@ -73,8 +77,8 @@ function DjvuDocument:getOCRText(pageno, tboxes)
     return self.koptinterface:getOCRText(self, pageno, tboxes)
 end
 
-function DjvuDocument:getPageRegions(pageno)
-    return self.koptinterface:getPageRegions(self, pageno)
+function DjvuDocument:getPageBlock(pageno, x, y)
+    return self.koptinterface:getPageBlock(self, pageno, x, y)
 end
 
 function DjvuDocument:getUsedBBox(pageno)
@@ -105,6 +109,10 @@ function DjvuDocument:getCoverPageImage()
     return self.koptinterface:getCoverPageImage(self)
 end
 
+function DjvuDocument:findText(pattern, origin, reverse, caseInsensitive, page)
+    return self.koptinterface:findText(self, pattern, origin, reverse, caseInsensitive, page)
+end
+
 function DjvuDocument:renderPage(pageno, rect, zoom, rotation, gamma, render_mode)
     return self.koptinterface:renderPage(self, pageno, rect, zoom, rotation, gamma, render_mode)
 end
@@ -119,6 +127,7 @@ end
 
 function DjvuDocument:register(registry)
     registry:addProvider("djvu", "application/djvu", self)
+    registry:addProvider("djv", "application/djvu", self)
 end
 
 return DjvuDocument

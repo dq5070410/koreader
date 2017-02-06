@@ -1,22 +1,30 @@
-local util = require("ffi/util")
-local DEBUG = require("dbg")
+local Event = require("ui/event")
+local logger = require("logger")
+local _ = require("gettext")
 
+local function yes() return true end
 local function no() return false end
 
 local Device = {
     screen_saver_mode = false,
     charging_mode = false,
     survive_screen_saver = false,
+    is_cover_closed = false,
     model = nil,
     powerd = nil,
     screen = nil,
     input = nil,
+    -- For Kobo, wait at least 15 seconds before calling suspend script. Otherwise, suspend might
+    -- fail and the battery will be drained while we are in screensaver mode
+    suspend_wait_timeout = 15,
 
     -- hardware feature tests: (these are functions!)
     hasKeyboard = no,
     hasKeys = no,
+    hasDPad = no,
     isTouchDevice = no,
     hasFrontlight = no,
+    needsTouchScreenProbe = no,
 
     -- use these only as a last resort. We should abstract the functionality
     -- and have device dependent implementations in the corresponting
@@ -24,15 +32,21 @@ local Device = {
     -- (these are functions!)
     isKindle = no,
     isKobo = no,
+    isPocketBook = no,
     isAndroid = no,
-    isEmulator = no,
+    isSDL = no,
 
     -- some devices have part of their screen covered by the bezel
     viewport = nil,
+    -- enforce portrait orientation on display, no matter how configured at
+    -- startup
+    isAlwaysPortrait = no,
+    -- needs full screen refresh when resumed from screensaver?
+    needsScreenRefreshAfterResume = yes,
 }
 
 function Device:new(o)
-    local o = o or {}
+    o = o or {}
     setmetatable(o, self)
     self.__index = self
     return o
@@ -40,8 +54,15 @@ end
 
 function Device:init()
     if not self.screen then
-        self.screen = require("device/screen"):new{device = self}
+        error("screen/framebuffer must be implemented")
     end
+
+    local is_eink = G_reader_settings:readSetting("eink")
+    self.screen.eink = (is_eink == nil) or is_eink
+
+    logger.info("initializing for device", self.model)
+    logger.info("framebuffer resolution:", self.screen:getSize())
+
     if not self.input then
         self.input = require("device/input"):new{device = self}
     end
@@ -50,6 +71,7 @@ function Device:init()
     end
 
     if self.viewport then
+        logger.dbg("setting a viewport:", self.viewport)
         self.screen:setViewport(self.viewport)
         self.input:registerEventAdjustHook(
             self.input.adjustTouchTranslate,
@@ -61,80 +83,85 @@ function Device:getPowerDevice()
     return self.powerd
 end
 
-function Device:intoScreenSaver()
-    if self.charging_mode == false and self.screen_saver_mode == false then
-        self.screen:saveCurrentBB()
-        self.screen_saver_mode = true
-    end
+function Device:rescheduleSuspend()
+    local UIManager = require("ui/uimanager")
+    UIManager:unschedule(self.suspend)
+    UIManager:scheduleIn(self.suspend_wait_timeout, self.suspend)
 end
 
-function Device:outofScreenSaver()
-    if self.screen_saver_mode == true and self.charging_mode == false then
-        -- wait for native system update screen before we recover saved
-        -- Blitbuffer.
-        util.usleep(1500000)
-        self.screen:restoreFromSavedBB()
-        self.screen:refresh(0)
-        self.survive_screen_saver = true
-    end
-    self.screen_saver_mode = false
-end
-
+-- ONLY used for Kobo and PocketBook devices
 function Device:onPowerEvent(ev)
-    local Screensaver = require("ui/screensaver")
-    if (ev == "Power" or ev == "Suspend") and not self.screen_saver_mode then
+    if self.screen_saver_mode then
+        if ev == "Power" or ev == "Resume" then
+            if self.is_cover_closed then
+                -- don't let power key press wake up device when the cover is in closed state
+                self:rescheduleSuspend()
+            else
+                logger.dbg("Resuming...")
+                local UIManager = require("ui/uimanager")
+                UIManager:unschedule(self.suspend)
+                local network_manager = require("ui/network/manager")
+                if network_manager.wifi_was_on and G_reader_settings:nilOrTrue("auto_restore_wifi") then
+                    network_manager:restoreWifiAsync()
+                end
+                self:resume()
+                require("ui/screensaver"):close()
+                -- restore to previous rotation mode
+                self.screen:setRotationMode(self.orig_rotation_mode)
+                if self:needsScreenRefreshAfterResume() then
+                    UIManager:scheduleIn(1, function() self.screen:refreshFull() end)
+                end
+                self.screen_saver_mode = false
+                self.powerd:refreshCapacity()
+                self.powerd:afterResume()
+            end
+        elseif ev == "Suspend" then
+            -- Already in screen saver mode, no need to update UI/state before
+            -- suspending the hardware. This usually happens when sleep cover
+            -- is closed after the device was sent to suspend state.
+            logger.dbg("Already in screen saver mode, suspending...")
+            self:rescheduleSuspend()
+        end
+    -- else we we not in screensaver mode
+    elseif ev == "Power" or ev == "Suspend" then
+        self.powerd:beforeSuspend()
+        local network_manager = require("ui/network/manager")
+        if network_manager.wifi_was_on then
+            network_manager:releaseIP()
+            network_manager:turnOffWifi()
+        end
         local UIManager = require("ui/uimanager")
-        DEBUG("Suspending...")
+        -- flushing settings first in case the screensaver takes too long time
+        -- that flushing has no chance to run
+        UIManager:broadcastEvent(Event:new("FlushSettings"))
+        logger.dbg("Suspending...")
         -- always suspend in portrait mode
         self.orig_rotation_mode = self.screen:getRotationMode()
         self.screen:setRotationMode(0)
-        Screensaver:show()
-        self:prepareSuspend()
-        UIManager:scheduleIn(10, self.Suspend)
-    elseif (ev == "Power" or ev == "Resume") and self.screen_saver_mode then
-        DEBUG("Resuming...")
-        -- restore to previous rotation mode
-        self.screen:setRotationMode(self.orig_rotation_mode)
-        self:Resume()
-        Screensaver:close()
+        require("ui/screensaver"):show("suspend", _("Sleeping"))
+        self.screen:refreshFull()
+        self.screen_saver_mode = true
+        UIManager:scheduleIn(self.suspend_wait_timeout, self.suspend)
     end
 end
 
-function Device:prepareSuspend()
-    if self.powerd and self.powerd.fl ~= nil then
-        -- in no case should the frontlight be turned on in suspend mode
-        self.powerd.fl:sleep()
-    end
-    self.screen:refresh(0)
-    self.screen_saver_mode = true
-end
+-- Hardware specific method to handle usb plug in event
+function Device:usbPlugIn() end
 
-function Device:Suspend()
-end
+-- Hardware specific method to handle usb plug out event
+function Device:usbPlugOut() end
 
-function Device:Resume()
-    local UIManager = require("ui/uimanager")
-    UIManager:unschedule(self.Suspend)
-    self.screen:refresh(1)
-    self.screen_saver_mode = false
-end
+-- Hardware specific method to suspend the device
+function Device:suspend() end
 
-function Device:usbPlugIn()
-    if self.charging_mode == false and self.screen_saver_mode == false then
-        self.screen:saveCurrentBB()
-    end
-    self.charging_mode = true
-end
+-- Hardware specific method to resume the device
+function Device:resume() end
 
-function Device:usbPlugOut()
-    if self.charging_mode == true and self.screen_saver_mode == false then
-        self.screen:restoreFromSavedBB()
-        self.screen:refresh(0)
-    end
+-- Hardware specific method to power off the device
+function Device:powerOff() end
 
-    --@TODO signal filemanager for file changes  13.06 2012 (houqp)
-    self.charging_mode = false
-end
+-- Hardware specific method to initialize network manager module
+function Device:initNetworkManager() end
 
 --[[
 prepare for application shutdown
@@ -142,6 +169,37 @@ prepare for application shutdown
 function Device:exit()
     require("ffi/input"):closeAll()
     self.screen:close()
+end
+
+function Device:retrieveNetworkInfo()
+    local std_out = io.popen("ifconfig | " ..
+                             "sed -n " ..
+                             "-e 's/ \\+$//g' " ..
+                             "-e 's/ \\+/ /g' " ..
+                             "-e 's/ \\?inet6\\? addr: \\?\\([^ ]\\+\\) .*$/IP: \\1/p' " ..
+                             "-e 's/Link encap:Ethernet\\(.*\\)/\\1/p'",
+                             "r")
+    if std_out then
+        local result = std_out:read("*all")
+        std_out:close()
+        std_out = io.popen('iwconfig eth0 | grep ESSID | cut -d\\" -f2')
+        if std_out then
+            local ssid = std_out:read("*all")
+            result = result .. "SSID: " .. ssid:gsub("(.-)%s*$", "%1") .. "\n"
+            std_out:close()
+        end
+        if os.execute("ip r | grep -q default") == 0 then
+            local pingok = os.execute("ping -q -w 3 -c 2 `ip r | grep default | cut -d ' ' -f 3` > /dev/null")
+            if pingok == 0 then
+                result = result .. "Gateway ping successfull"
+            else
+                result = result .. "Gateway ping FAILED"
+            end
+        else
+            result = result .. "No default gateway to ping"
+        end
+        return result
+    end
 end
 
 return Device

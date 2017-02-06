@@ -1,29 +1,34 @@
-# Travis-CI Build for koreader
-# see travis-ci.org for details
-
 language: c
 
+# sudo: false
+sudo: true
+dist: trusty
+
 compiler:
-    - gcc
+  - gcc
 
 env:
-    - EMULATE_READER=1 USE_NO_CCACHE=1
+  - EMULATE_READER=1
 
-before_install:
-    - sudo apt-get update
+cache:
+  apt: true
+  directories:
+    - $HOME/.ccache
 
-install:
-    - sudo apt-get install libsdl1.2-dev luarocks nasm
-    - git clone https://github.com/Olivine-Labs/busted/
-    - cd busted && git checkout v1.10.0 && sudo luarocks make && cd ..
-    - sudo luarocks install luacov
-    - sudo luarocks install luacov-coveralls --server=http://rocks.moonscript.org/dev
+addons:
+  apt:
+    sources:
+      - ubuntu-toolchain-r-test
+    packages:
+      - g++-4.8
+      - libsdl1.2-dev
+      # for luasec
+      - libssl1.0.0
+      - nasm
+      # OpenSSL likes this (package contains makedepend)
+      - xutils-dev
 
-script:
-    - make fetchthirdparty all
-    - sudo cp base/build/*/luajit /usr/bin/
-    - make testfront
-    - make coverage
-
-after_success:
-    - cd koreader-*/koreader && luacov-coveralls -v
+before_install: .ci/before_install.sh
+install: .ci/install.sh
+script: .ci/script.sh
+after_success: .ci/after_success.sh

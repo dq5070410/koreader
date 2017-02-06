@@ -13,7 +13,7 @@ DHINTCOUNT = 1
 DFULL_SCREEN = 1
 
 -- scroll mode, 1 for true, 0 for false
-DSCROLL_MODE = 0
+DSCROLL_MODE = 1
 
 -- default gamma setting:
 DGLOBALGAMMA = 1.0
@@ -26,10 +26,10 @@ DRENDER_MODE = 0 -- 0 is COLOUR
 DGLOBAL_CACHE_SIZE_MINIMUM = 1024*1024*10
 
 -- proportion of system free memory used as global cache
-DGLOBAL_CACHE_FREE_PROPORTION = 0.2
+DGLOBAL_CACHE_FREE_PROPORTION = 0.4
 
 -- maximum cache size
-DGLOBAL_CACHE_SIZE_MAXIMUM = 1024*1024*30
+DGLOBAL_CACHE_SIZE_MAXIMUM = 1024*1024*60
 
 -- background colour in non scroll mode: 8 = gray, 0 = white, 15 = black
 DBACKGROUND_COLOR = 0
@@ -57,6 +57,11 @@ DCREREADER_TWO_PAGE_THRESHOLD = 7
 
 -- page overlap pixels
 DOVERLAPPIXELS = 30
+
+-- timeout to show link rectangle around links
+-- default to 0.5 second
+-- set to 0 to disable showing rectangle and follow link immediately
+FOLLOW_LINK_TIMEOUT = 0.5
 
 -- customizable tap zones(rectangles)
 -- x: x coordinate of top left corner in proportion of screen width
@@ -101,7 +106,7 @@ DKOPTREADER_CONFIG_DOC_DEFAULT_LANG_CODE = "eng"          -- that have filenames
 
 -- crereader font sizes
 -- feel free to add more entries in this list
-DCREREADER_CONFIG_FONT_SIZES = {16, 20, 22, 24, 26, 28, 30, 34, 38, 44}  -- option range from 16 to 44
+DCREREADER_CONFIG_FONT_SIZES = {12, 16, 20, 22, 24, 26, 28, 30, 34, 38, 44}  -- option range from 12 to 44
 DCREREADER_CONFIG_DEFAULT_FONT_SIZE = 22    -- default font size
 
 -- crereader margin sizes
@@ -126,26 +131,12 @@ DCREREADER_CONFIG_LINE_SPACE_PERCENT_LARGE = 120
 DCREREADER_PROGRESS_BAR = 1
 
 -- configure "mini" progress bar
-DMINIBAR_ALL_AT_ONCE = false
-DMINIBAR_PROGRESSBAR = true
-DMINIBAR_TIME = true
-DMINIBAR_PAGES = true
-DMINIBAR_NEXT_CHAPTER = true
-DMINIBAR_BATTERY = true
-
-DMINIBAR_PROGRESS_MARKER = true -- Black notch for each TOC entry
 DMINIBAR_TOC_MARKER_WIDTH = 2   -- Looses usefulness > 3
-
 DMINIBAR_HEIGHT = 7             -- Should be smaller than DMINIBAR_CONTAINER_HEIGHT
 DMINIBAR_CONTAINER_HEIGHT = 14  -- Larger means more padding at the bottom, at the risk of eating into the last line
-
 DMINIBAR_FONT_SIZE = 14
 
-
--- gesture detector defaults
-DGESDETECT_DISABLE_DOUBLE_TAP = true
-
--- change this to any numerical value if you want to antomatically save settings when turning pages
+-- change this to any numerical value if you want to automatically save settings when turning pages
 DAUTO_SAVE_PAGING_COUNT = nil
 
 -- dictionary font size
@@ -154,6 +145,12 @@ DDICT_FONT_SIZE = 20
 -- Frontlight decrease of sensitivity for two-fingered pan gesture,
 -- e.g. 2 changes the sensitivity by 1/2, 3 by 1/3 etc.
 FRONTLIGHT_SENSITIVITY_DECREASE = 2
+
+-- Normally, KOReader will present file lists sorted in case insensitive manner
+-- when presenting an alphatically sorted list. So the Order is "A, b, C, d".
+-- You can switch to a case sensitive sort ("A", "C", "b", "d") by disabling
+-- insensitive sort
+DALPHA_SORT_CASE_INSENSITIVE = true
 
 -- Set a path to a folder that is filled by Calibre (must contain the file metadata.calibre)
 -- e.g.
@@ -173,15 +170,23 @@ SEARCH_SERIES = true
 SEARCH_PATH = true
 
 -- Light parameter for Kobo
-KOBO_LIGHT_OFF_ON_SUSPEND = false
-KOBO_LIGHT_ON_START = -1           -- -1 or 0-100. -1 leaves light as it is, other sets light on start/wake up
-KOBO_SCREEN_SAVER = ""             -- image or directory with pictures or "-"
-KOBO_SCREEN_SAVER_LAST_BOOK = true -- get screensaver from last book if possible
+KOBO_LIGHT_ON_START = -2           -- -1, -2 or 0-100. -1 leaves light as it
+                                   -- is, -2 uses 'Kobo eReader.conf', other
+                                   -- sets light on start/wake up
+KOBO_SYNC_BRIGHTNESS_WITH_NICKEL = true  -- Save brightness set in KOreader
+                                         -- with nickel's 'Kobo eReader.conf'
 
 -- Network proxy settings
 -- proxy url should be a string in the format of "http://localhost:3128"
 -- proxy authentication is not supported yet.
 NETWORK_PROXY = nil
+
+-- Experimental features
+-- Use turbo library to handle async HTTP request
+DUSE_TURBO_LIB = false
+
+-- Custom font dir for Android
+ANDROID_FONT_DIR = "/system/fonts;/sdcard/koreader/fonts"
 
 -- ####################################################################
 -- following features are not supported right now

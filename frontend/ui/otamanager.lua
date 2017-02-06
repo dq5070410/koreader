@@ -1,32 +1,54 @@
 local InfoMessage = require("ui/widget/infomessage")
 local ConfirmBox = require("ui/widget/confirmbox")
-local NetworkMgr = require("ui/networkmgr")
+local NetworkMgr = require("ui/network/manager")
 local lfs = require("libs/libkoreader-lfs")
+local DataStorage = require("datastorage")
 local UIManager = require("ui/uimanager")
 local Device = require("device")
-local DEBUG = require("dbg")
+local logger = require("logger")
+local T = require("ffi/util").template
 local _ = require("gettext")
+
+local ota_dir = DataStorage:getDataDir() .. "/ota/"
 
 local OTAManager = {
     ota_servers = {
+        "http://ota.koreader.rocks:80/",
         "http://vislab.bjmu.edu.cn:80/apps/koreader/ota/",
+        "http://koreader-eu.ak-team.com:80/",
+        "http://koreader-af.ak-team.com:80/",
+        "http://koreader-na.ak-team.com:80/",
         "http://koreader.ak-team.com:80/",
         "http://hal9k.ifsc.usp.br:80/koreader/",
     },
     ota_channels = {
+        "stable",
         "nightly",
     },
     zsync_template = "koreader-%s-latest-%s.zsync",
-    installed_package = "ota/koreader.installed.tar",
+    installed_package = ota_dir .. "koreader.installed.tar",
     package_indexfile = "ota/package.index",
-    updated_package = "ota/koreader.updated.tar",
+    updated_package = ota_dir .. "koreader.updated.tar",
+}
+
+local ota_channels = {
+    stable = _("Stable"),
+    nightly = _("Development"),
 }
 
 function OTAManager:getOTAModel()
     if Device:isKindle() then
-        return "kindle"
+        if Device:isTouchDevice() then
+            return "kindle"
+        else
+            return "kindle-legacy"
+        end
     elseif Device:isKobo() then
         return "kobo"
+    elseif Device:isPocketBook() then
+        return "pocketbook"
+    elseif Device:isAndroid() then
+        return "android"
     else
         return ""
     end
@@ -37,7 +59,7 @@ function OTAManager:getOTAServer()
 end
 
 function OTAManager:setOTAServer(server)
-    DEBUG("Set OTA server:", server)
+    logger.dbg("Set OTA server:", server)
     G_reader_settings:saveSetting("ota_server", server)
 end
 
@@ -46,7 +68,7 @@ function OTAManager:getOTAChannel()
 end
 
 function OTAManager:setOTAChannel(channel)
-    DEBUG("Set OTA channel:", channel)
+    logger.dbg("Set OTA channel:", channel)
     G_reader_settings:saveSetting("ota_channel", channel)
 end
 
@@ -60,13 +82,16 @@ function OTAManager:checkUpdate()
 
     local zsync_file = self:getZsyncFilename()
     local ota_zsync_file = self:getOTAServer() .. zsync_file
-    local local_zsync_file = "ota/" .. zsync_file
+    local local_zsync_file = ota_dir .. zsync_file
     -- download zsync file from OTA server
-    local r, c, h = http.request{
+    logger.dbg("downloading zsync file", ota_zsync_file)
+    local _, c, _ = http.request{
         url = ota_zsync_file,
         sink = ltn12.sink.file(io.open(local_zsync_file, "w"))}
-    -- prompt users to turn on Wifi if network is unreachable
-    if c ~= 200 then return end
+    if c ~= 200 then
+        logger.warn("cannot find zsync file", c)
+        return
+    end
     -- parse OTA package version
     local ota_package = nil
     local zsync = io.open(local_zsync_file, "r")
@@ -77,48 +102,64 @@ function OTAManager:checkUpdate()
         end
         zsync:close()
     end
-    local local_version = io.open("git-rev", "r"):read()
-    local ota_version = nil
-    if ota_package then
-        ota_version = ota_package:match(".-(v%d.-)%.tar")
+    local normalized_version = function(rev)
+        local year, month, revision = rev:match("v(%d%d%d%d)%.(%d%d)-?(%d*)")
+        return tonumber(year .. month .. string.format("%.4d", revision or "0"))
     end
+    local local_ok, local_version = pcall(function()
+        local rev_file = io.open("git-rev", "r")
+        if rev_file then
+            local rev = rev_file:read()
+            rev_file:close()
+            return normalized_version(rev)
+        end
+    end)
+    local ota_ok, ota_version = pcall(function()
+        return normalized_version(ota_package)
+    end)
     -- return ota package version if package on OTA server has version
     -- larger than the local package version
-    if ota_version and ota_version > local_version then
-        return ota_version
+    if local_ok and ota_ok and ota_version and local_version and
+        ota_version ~= local_version then
+        return ota_version, local_version
     elseif ota_version and ota_version == local_version then
         return 0
     end
 end
 
 function OTAManager:fetchAndProcessUpdate()
-    local ota_version = OTAManager:checkUpdate()
+    local ota_version, local_version = OTAManager:checkUpdate()
     if ota_version == 0 then
         UIManager:show(InfoMessage:new{
-            text = _("Your koreader is updated."),
+            text = _("Your KOReader is up to date."),
         })
     elseif ota_version == nil then
+        local channel = ota_channels[OTAManager:getOTAChannel()]
         UIManager:show(InfoMessage:new{
-            text = _("OTA server is not available."),
+            text = T(_("OTA package is not available on %1 channel."), channel),
         })
     elseif ota_version then
         UIManager:show(ConfirmBox:new{
-            text = _("Do you want to update to version ")..ota_version.."?",
+            text = T(
+                _("Do you want to update?\nInstalled version: %1\nAvailable version: %2"),
+                local_version,
+                ota_version
+            ),
             ok_callback = function()
                 UIManager:show(InfoMessage:new{
-                    text = _("Downloading may take several minutes..."),
+                    text = _("Downloading may take several minutes…"),
                     timeout = 3,
                 })
                 UIManager:scheduleIn(1, function()
                     if OTAManager:zsync() == 0 then
                         UIManager:show(InfoMessage:new{
-                            text = _("Koreader will be updated on next restart."),
+                            text = _("KOReader will be updated on next restart."),
                         })
                     else
                         UIManager:show(ConfirmBox:new{
-                            text = _("Error updating Koreader. Would you like to delete temporary files?"),
+                            text = _("Error updating KOReader. Would you like to delete temporary files?"),
                             ok_callback = function()
-                                os.execute("rm ota/ko*")
+                                os.execute("rm " .. ota_dir .. "ko*")
                             end,
                         })
                     end
@@ -130,13 +171,19 @@ end
 
 function OTAManager:_buildLocalPackage()
     -- TODO: validate the installed package?
-    local installed_package = lfs.currentdir() .. "/" .. self.installed_package
+    local installed_package = self.installed_package
     if lfs.attributes(installed_package, "mode") == "file" then
         return 0
     end
-    return os.execute(string.format(
-        "./tar cvf %s -C .. -T %s --no-recursion",
-        self.installed_package, self.package_indexfile))
+    if Device:isAndroid() then
+        return os.execute(string.format(
+            "./tar cvf %s -T %s --no-recursion",
+            self.installed_package, self.package_indexfile))
+    else
+        return os.execute(string.format(
+            "./tar cvf %s -C .. -T %s --no-recursion",
+            self.installed_package, self.package_indexfile))
+    end
 end
 
 function OTAManager:zsync()
@@ -144,7 +191,7 @@ function OTAManager:zsync()
         return os.execute(string.format(
         "./zsync -i %s -o %s -u %s %s",
         self.installed_package, self.updated_package,
-        self:getOTAServer(), "ota/" .. self:getZsyncFilename()
+        self:getOTAServer(), ota_dir .. self:getZsyncFilename()
         ))
     end
 end
@@ -166,7 +213,7 @@ function OTAManager:genChannelList()
     local channels = {}
     for _, channel in ipairs(self.ota_channels) do
         local channel_item = {
-            text = channel,
+            text = ota_channels[channel],
             checked_func = function() return self:getOTAChannel() == channel end,
             callback = function() self:setOTAChannel(channel) end
         }
@@ -180,12 +227,12 @@ function OTAManager:getOTAMenuTable()
         text = _("OTA update"),
         sub_item_table = {
             {
-                text = _("Check update"),
+                text = _("Check for update"),
                 callback = function()
-                    if NetworkMgr:getWifiStatus() == false then
+                    if not NetworkMgr:isOnline() then
                         NetworkMgr:promptWifiOn()
                     else
-                        OTAManager.fetchAndProcessUpdate()
+                        OTAManager:fetchAndProcessUpdate()
                     end
                 end
             },

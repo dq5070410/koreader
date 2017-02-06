@@ -1,14 +1,13 @@
 local InputContainer = require("ui/widget/container/inputcontainer")
 local InputDialog = require("ui/widget/inputdialog")
 local UIManager = require("ui/uimanager")
-local Screen = require("device").screen
 local Event = require("ui/event")
-local DEBUG = require("dbg")
 local _ = require("gettext")
+local SkimToWidget = require("frontend/apps/reader/skimtowidget")
 
 local ReaderGoto = InputContainer:new{
-    goto_menu_title = _("Go To"),
-    goto_dialog_title = _("Go to Page or Location"),
+    goto_menu_title = _("Go to"),
+    skim_menu_title = _("Skim to"),
 }
 
 function ReaderGoto:init()
@@ -23,15 +22,39 @@ function ReaderGoto:addToMainMenu(tab_item_table)
             self:onShowGotoDialog()
         end,
     })
+    table.insert(tab_item_table.navi, {
+        text = self.skim_menu_title,
+        callback = function()
+            self:onShowSkimtoDialog()
+        end,
+    })
 end
 
 function ReaderGoto:onShowGotoDialog()
-    DEBUG("show goto dialog")
+    local dialog_title, goto_btn, curr_page
+    if self.document.info.has_pages then
+        dialog_title = _("Go to Page")
+        goto_btn = {
+            is_enter_default = true,
+            text = _("Page"),
+            callback = function() self:gotoPage() end,
+        }
+        curr_page = self.ui.paging.current_page
+    else
+        dialog_title = _("Go to Location")
+        goto_btn = {
+            is_enter_default = true,
+            text = _("Location"),
+            callback = function() self:gotoPage() end,
+        }
+        -- only CreDocument has this method
+        curr_page = self.document:getCurrentPage()
+    end
     self.goto_dialog = InputDialog:new{
-        title = self.goto_dialog_title,
-        input_hint = "(1 - "..self.document:getPageCount()..")",
+        title = dialog_title,
+        input_hint = "@"..curr_page.." (1 - "..self.document:getPageCount()..")",
         buttons = {
-            {    
+            {
                 {
                     text = _("Cancel"),
                     enabled = true,
@@ -39,54 +62,60 @@ function ReaderGoto:onShowGotoDialog()
                         self:close()
                     end,
                 },
+                goto_btn,
                 {
-                    text = _("Page"),
-                    enabled = self.document.info.has_pages,
+                    text = _("Skim mode"),
+                    enabled = true,
                     callback = function()
-                        self:gotoPage()
-                    end,
-                },
-                {
-                    text = _("Location"),
-                    enabled = not self.document.info.has_pages,
-                    callback = function()
-                        self:gotoLocation()
+                        self:close()
+                        self.skimto = SkimToWidget:new{
+                            document = self.document,
+                            ui = self.ui,
+                            callback_switch_to_goto = function()
+                                UIManager:close(self.skimto)
+                                self:onShowGotoDialog()
+                            end,
+                        }
+                        UIManager:show(self.skimto)
+
                     end,
                 },
             },
         },
         input_type = "number",
-        enter_callback = self.document.info.has_pages 
-            and function() self:gotoPage() end 
-            or function() self:gotoLocation() end,
-        width = Screen:getWidth() * 0.8,
-        height = Screen:getHeight() * 0.2,
     }
     self.goto_dialog:onShowKeyboard()
     UIManager:show(self.goto_dialog)
 end
 
+function ReaderGoto:onShowSkimtoDialog()
+    self.skimto = SkimToWidget:new{
+        document = self.document,
+        ui = self.ui,
+        callback_switch_to_goto = function()
+            UIManager:close(self.skimto)
+            self:onShowGotoDialog()
+        end,
+    }
+    UIManager:show(self.skimto)
+end
+
 function ReaderGoto:close()
-    self.goto_dialog:onClose()
     UIManager:close(self.goto_dialog)
 end
 
 function ReaderGoto:gotoPage()
-    local number = tonumber(self.goto_dialog:getInputText())
+    local page_number = self.goto_dialog:getInputText()
+    local relative_sign = page_number:sub(1, 1)
+    local number = tonumber(page_number)
     if number then
-        self.ui:handleEvent(Event:new("GotoPage", number))
+        if relative_sign == "+" or relative_sign == "-" then
+            self.ui:handleEvent(Event:new("GotoRelativePage", number))
+        else
+            self.ui:handleEvent(Event:new("GotoPage", number))
+        end
+        self:close()
     end
-    self:close()
-    return true
-end
-
-function ReaderGoto:gotoLocation()
-    local number = tonumber(self.goto_dialog:getInputText())
-    if number then
-        self.ui:handleEvent(Event:new("GotoPage", number))
-    end
-    self:close()
-    return true
 end
 
 return ReaderGoto

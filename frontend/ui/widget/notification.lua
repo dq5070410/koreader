@@ -6,7 +6,6 @@ local Font = require("ui/font")
 local Geom = require("ui/geometry")
 local Device = require("device")
 local UIManager = require("ui/uimanager")
-local HorizontalGroup = require("ui/widget/horizontalgroup")
 local Input = require("device").input
 local Screen = require("device").screen
 local Blitbuffer = require("ffi/blitbuffer")
@@ -55,8 +54,18 @@ function Notification:init()
     }
 end
 
+function Notification:onCloseWidget()
+    UIManager:setDirty(nil, function()
+        return "partial", self[1][1].dimen
+    end)
+    return true
+end
+
 function Notification:onShow()
     -- triggered by the UIManager after we got successfully shown (not yet painted)
+    UIManager:setDirty(self, function()
+        return "ui", self[1][1].dimen
+    end)
     if self.timeout then
         UIManager:scheduleIn(self.timeout, function() UIManager:close(self) end)
     end

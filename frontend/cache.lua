@@ -1,9 +1,14 @@
 --[[
 A global LRU cache
 ]]--
-require("MD5")
+local md5 = require("ffi/MD5")
 local lfs = require("libs/libkoreader-lfs")
-local DEBUG = require("dbg")
+local DataStorage = require("datastorage")
+local logger = require("logger")
+
+if require("device"):isAndroid() then
+    require("jit").off(true, true)
+end
 
 local function calcFreeMem()
     local meminfo = io.open("/proc/meminfo", "r")
@@ -30,12 +35,12 @@ local function calcCacheMemSize()
     return math.min(max, math.max(min, calc))
 end
 
-local cache_path = lfs.currentdir().."/cache/"
+local cache_path = DataStorage:getDataDir() .. "/cache/"
 
 --[[
 -- return a snapshot of disk cached items for subsequent check
 --]]
-function getDiskCache()
+local function getDiskCache()
     local cached = {}
     for key_md5 in lfs.dir(cache_path) do
         local file = cache_path..key_md5
@@ -66,19 +71,42 @@ function Cache:new(o)
     return o
 end
 
+-- internal: remove reference in cache_order list
+function Cache:_unref(key)
+    for i = #self.cache_order, 1, -1 do
+        if self.cache_order[i] == key then
+            table.remove(self.cache_order, i)
+        end
+    end
+end
+
+-- internal: free cache item
+function Cache:_free(key)
+    if not self.cache[key] then return end
+    self.current_memsize = self.current_memsize - self.cache[key].size
+    self.cache[key]:onFree()
+    self.cache[key] = nil
+end
+
+-- drop an item named via key from the cache
+function Cache:drop(key)
+    self:_unref(key)
+    self:_free(key)
+end
+
 function Cache:insert(key, object)
+    -- make sure that one key only exists once: delete existing
+    self:drop(key)
     -- guarantee that we have enough memory in cache
-    if(object.size > self.max_memsize) then
-        DEBUG("too much memory claimed for", key)
+    if (object.size > self.max_memsize) then
+        logger.warn("too much memory claimed for", key)
         return
     end
     -- delete objects that least recently used
     -- (they are at the end of the cache_order array)
     while self.current_memsize + object.size > self.max_memsize do
         local removed_key = table.remove(self.cache_order)
-        self.current_memsize = self.current_memsize - self.cache[removed_key].size
-        self.cache[removed_key]:onFree()
-        self.cache[removed_key] = nil
+        self:_free(removed_key)
     end
     -- insert new object in front of the LRU order
     table.insert(self.cache_order, 1, key)
@@ -94,16 +122,12 @@ function Cache:check(key, ItemClass)
     if self.cache[key] then
         if self.cache_order[1] ~= key then
             -- put key in front of the LRU list
-            for k, v in ipairs(self.cache_order) do
-                if v == key then
-                    table.remove(self.cache_order, k)
-                end
-            end
+            self:_unref(key)
             table.insert(self.cache_order, 1, key)
         end
         return self.cache[key]
     elseif ItemClass then
-        local cached = self.cached[md5(key)]
+        local cached = self.cached[md5.sum(key)]
         if cached then
             local item = ItemClass:new{}
             local ok, msg = pcall(item.load, item, cached)
@@ -111,7 +135,7 @@ function Cache:check(key, ItemClass)
                 self:insert(key, item)
                 return item
             else
-                DEBUG("discard cache", msg)
+                logger.warn("discard cache", msg)
             end
         end
     end
@@ -133,14 +157,14 @@ function Cache:serialize()
         cached_size = cached_size + (lfs.attributes(file, "size") or 0)
     end
     table.sort(sorted_caches, function(v1,v2) return v1.time > v2.time end)
-    -- serialize the most recently used cache
+    -- only serialize the most recently used cache
     local cache_size = 0
     for _, key in ipairs(self.cache_order) do
         local cache_item = self.cache[key]
         -- only dump cache item that requests serialization explicitly
         if cache_item.persistent and cache_item.dump then
-            DEBUG("dump cache item", key)
-            cache_size = cache_item:dump(cache_path..md5(key)) or 0
+            logger.dbg("dump cache item", key)
+            cache_size = cache_item:dump(cache_path..md5.sum(key)) or 0
             if cache_size > 0 then break end
         end
     end

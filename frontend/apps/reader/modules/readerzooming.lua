@@ -7,7 +7,8 @@ local Input = require("device").input
 local Screen = require("device").screen
 local Geom = require("ui/geometry")
 local Event = require("ui/event")
-local DEBUG = require("dbg")
+local logger = require("logger")
+local T = require("ffi/util").template
 local _ = require("gettext")
 
 local ReaderZooming = InputContainer:new{
@@ -112,7 +113,7 @@ function ReaderZooming:onReadSettings(config)
 end
 
 function ReaderZooming:onSaveSettings()
-    self.ui.doc_settings:saveSetting("zoom_mode", self.zoom_mode)
+    self.ui.doc_settings:saveSetting("zoom_mode", self.orig_zoom_mode or self.zoom_mode)
 end
 
 function ReaderZooming:onSpread(arg, ges)
@@ -140,10 +141,9 @@ end
 function ReaderZooming:onToggleFreeZoom(arg, ges)
     if self.zoom_mode ~= "free" then
         self.orig_zoom = self.zoom
-        self.orig_zoom_mode = self.zoom_mode
         local xpos, ypos
         self.zoom, xpos, ypos = self:getRegionalZoomCenter(self.current_page, ges.pos)
-        DEBUG("zoom center", self.zoom, xpos, ypos)
+        logger.info("zoom center", self.zoom, xpos, ypos)
         self.ui:handleEvent(Event:new("SetZoomMode", "free"))
         if xpos == nil or ypos == nil then
             xpos = ges.pos.x * self.zoom / self.orig_zoom
@@ -151,7 +151,7 @@ function ReaderZooming:onToggleFreeZoom(arg, ges)
         end
         self.view:SetZoomCenter(xpos, ypos)
     else
-        self.ui:handleEvent(Event:new("SetZoomMode", self.orig_zoom_mode or "page"))
+        self.ui:handleEvent(Event:new("SetZoomMode", "page"))
     end
 end
 
@@ -173,13 +173,13 @@ function ReaderZooming:onRotationUpdate(rotation)
 end
 
 function ReaderZooming:onZoom(direction)
-    DEBUG("zoom", direction)
+    logger.info("zoom", direction)
     if direction == "in" then
         self.zoom = self.zoom * 1.333333
     elseif direction == "out" then
         self.zoom = self.zoom * 0.75
     end
-    DEBUG("zoom is now at", self.zoom)
+    logger.info("zoom is now at", self.zoom)
     self:onSetZoomMode("free")
     self.view:onZoomUpdate(self.zoom)
     return true
@@ -188,7 +188,7 @@ end
 function ReaderZooming:onSetZoomMode(new_mode)
     self.view.zoom_mode = new_mode
     if self.zoom_mode ~= new_mode then
-        DEBUG("setting zoom mode to", new_mode)
+        logger.info("setting zoom mode to", new_mode)
         self.ui:handleEvent(Event:new("ZoomModeUpdate", new_mode))
         self.zoom_mode = new_mode
         self:setZoom()
@@ -204,6 +204,20 @@ function ReaderZooming:onReZoom()
     self:setZoom()
     self.ui:handleEvent(Event:new("InitScrollPageStates"))
     return true
+end
+
+function ReaderZooming:onEnterFlippingMode(zoom_mode)
+    self.orig_zoom_mode = self.zoom_mode
+    if zoom_mode == "free" then
+        self.ui:handleEvent(Event:new("SetZoomMode", "page"))
+    else
+        self.ui:handleEvent(Event:new("SetZoomMode", zoom_mode))
+    end
+end
+
+function ReaderZooming:onExitFlippingMode(zoom_mode)
+    self.orig_zoom_mode = nil
+    self.ui:handleEvent(Event:new("SetZoomMode", zoom_mode))
 end
 
 function ReaderZooming:getZoom(pageno)
@@ -227,12 +241,19 @@ function ReaderZooming:getZoom(pageno)
         self.view:onBBoxUpdate(nil)
     end
     -- calculate zoom value:
-    local zoom_w = self.dimen.w / page_size.w
-    local zoom_h = self.dimen.h / page_size.h
-    if self.rotation % 180 ~= 0 then
+    local zoom_w = self.dimen.w
+    local zoom_h = self.dimen.h
+    if self.ui.view.footer_visible then
+        zoom_h = zoom_h - self.ui.view.footer:getHeight()
+    end
+    if self.rotation % 180 == 0 then
+        -- No rotation or rotated by 180 degrees
+        zoom_w = zoom_w / page_size.w
+        zoom_h = zoom_h / page_size.h
+    else
         -- rotated by 90 or 270 degrees
-        zoom_w = self.dimen.w / page_size.h
-        zoom_h = self.dimen.h / page_size.w
+        zoom_w = zoom_w / page_size.h
+        zoom_h = zoom_h / page_size.w
     end
     if self.zoom_mode == "content" or self.zoom_mode == "page" then
         if zoom_w < zoom_h then
@@ -253,22 +274,19 @@ end
 function ReaderZooming:getRegionalZoomCenter(pageno, pos)
     local p_pos = self.view:getSinglePagePosition(pos)
     local page_size = self.ui.document:getNativePageDimensions(pageno)
-    local pos_x = p_pos.x / page_size.w / p_pos.zoom
-    local pos_y = p_pos.y / page_size.h / p_pos.zoom
-    local regions = self.ui.document:getPageRegions(pageno)
-    DEBUG("get page regions", regions)
+    local pos_x = p_pos.x / page_size.w
+    local pos_y = p_pos.y / page_size.h
+    local block = self.ui.document:getPageBlock(pageno, pos_x, pos_y)
     local margin = self.ui.document.configurable.page_margin * Screen:getDPI()
-    for i = 1, #regions do
-        if regions[i].x0 <= pos_x and pos_x <= regions[i].x1
-            and regions[i].y0 <= pos_y and pos_y <= regions[i].y1 then
-            local zoom = 1/(regions[i].x1 - regions[i].x0)
-            zoom = zoom/(1 + 3*margin/zoom/page_size.w)
-            local xpos = (regions[i].x0 + regions[i].x1)/2 * zoom * page_size.w
-            local ypos = p_pos.y / p_pos.zoom * zoom
-            return zoom, xpos, ypos
-        end
+    if block then
+        local zoom = self.dimen.w / page_size.w / (block.x1 - block.x0)
+        zoom = zoom/(1 + 3*margin/zoom/page_size.w)
+        local xpos = (block.x0 + block.x1)/2 * zoom * page_size.w
+        local ypos = p_pos.y / p_pos.zoom * zoom
+        return zoom, xpos, ypos
     end
-    return 2
+    local zoom = 2*self.dimen.w / page_size.w
+    return zoom/(1 + 3*margin/zoom/page_size.w)
 end
 
 function ReaderZooming:setZoom()
@@ -294,6 +312,9 @@ function ReaderZooming:addToMainMenu(tab_item_table)
     if self.ui.document.info.has_pages then
         table.insert(tab_item_table.typeset, {
             text = _("Switch zoom mode"),
+            enabled_func = function()
+                return self.ui.document.configurable.text_wrap ~= 1
+            end,
             sub_item_table = {
                 {
                     text = _("Zoom to fit content width"),
@@ -338,7 +359,10 @@ end
 
 function ReaderZooming:makeDefault(zoom_mode)
     UIManager:show(ConfirmBox:new{
-        text = _("Set default zoom mode to ")..zoom_mode.."?",
+        text = T(
+            _("Set default zoom mode to %1?"),
+            zoom_mode
+        ),
         ok_callback = function()
             G_reader_settings:saveSetting("zoom_mode", zoom_mode)
         end,

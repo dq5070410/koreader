@@ -1,10 +1,7 @@
 local ffi = require("ffi")
-local DEBUG = require("dbg")
-local util = require("ffi/util")
-local Event = require("ui/event")
 local MessageQueue = require("ui/message/messagequeue")
 
-local dummy = require("ffi/zeromq_h")
+local _ = require("ffi/zeromq_h")
 local czmq = ffi.load("libs/libczmq.so.1")
 local zyre = ffi.load("libs/libzyre.so.1")
 
@@ -27,7 +24,6 @@ end
 
 function ZyreMessageQueue:stop()
     if self.node ~= nil then
-        DEBUG("stop zyre node")
         zyre.zyre_stop(self.node)
         zyre.zyre_destroy(ffi.new('zyre_t *[1]', self.node))
     end

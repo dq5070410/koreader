@@ -1,16 +1,15 @@
-local InputContainer = require("ui/widget/container/inputcontainer")
-local TextWidget = require("ui/widget/textwidget")
-local ImageWidget = require("ui/widget/imagewidget")
-local Font = require("ui/font")
-local Geom = require("ui/geometry")
-local GestureRange = require("ui/gesturerange")
-local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
-local UIManager = require("ui/uimanager")
-local Device = require("device")
-local DEBUG = require("dbg")
-local _ = require("gettext")
+local InputContainer = require("ui/widget/container/inputcontainer")
+local FrameContainer = require("ui/widget/container/framecontainer")
+local ImageWidget = require("ui/widget/imagewidget")
+local TextWidget = require("ui/widget/textwidget")
+local GestureRange = require("ui/gesturerange")
 local Blitbuffer = require("ffi/blitbuffer")
+local UIManager = require("ui/uimanager")
+local Geom = require("ui/geometry")
+local Device = require("device")
+local Font = require("ui/font")
+local _ = require("gettext")
 
 --[[
 a button widget that shows text or a icon and handles callback when tapped
@@ -29,14 +28,15 @@ local Button = InputContainer:new{
     width = nil,
     text_font_face = "cfont",
     text_font_size = 20,
+    text_font_bold = true,
 }
 
 function Button:init()
     if self.text then
         self.label_widget = TextWidget:new{
             text = self.text,
-            fgcolor = Blitbuffer.gray(self.enabled and 1.0 or 0.5),
-            bold = true,
+            fgcolor = self.enabled and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GREY,
+            bold = self.text_font_bold,
             face = Font:getFace(self.text_font_face, self.text_font_size)
         }
     else
@@ -65,9 +65,7 @@ function Button:init()
         }
     }
     if self.preselect then
-        self.frame.color = Blitbuffer.COLOR_BLACK
-    else
-        self.frame.color = Blitbuffer.gray(0.33)
+        self:onFocus()
     end
     self.dimen = self.frame:getSize()
     self[1] = self.frame
@@ -91,20 +89,36 @@ function Button:init()
     end
 end
 
+function Button:setText(text)
+    self.text = text
+    self.width = nil
+    self:init()
+end
+
+function Button:setIcon(icon)
+    self.icon = icon
+    self.width = nil
+    self:init()
+end
+
 function Button:onFocus()
-    self[1].color = Blitbuffer.COLOR_BLACK
+    self.frame.invert = true
     return true
 end
 
 function Button:onUnfocus()
-    self[1].color = Blitbuffer.gray(0.33)
+    self.frame.invert = false
     return true
 end
 
 function Button:enable()
     self.enabled = true
     if self.text then
-        self.label_widget.fgcolor = Blitbuffer.gray(self.enabled and 1.0 or 0.5)
+        if self.enabled then
+            self.label_widget.fgcolor = Blitbuffer.COLOR_BLACK
+        else
+            self.label_widget.fgcolor = Blitbuffer.COLOR_GREY
+        end
     else
         self.label_widget.dim = not self.enabled
     end
@@ -113,7 +127,11 @@ end
 function Button:disable()
     self.enabled = false
     if self.text then
-        self.label_widget.fgcolor = Blitbuffer.gray(self.enabled and 1.0 or 0.5)
+        if self.enabled then
+            self.label_widget.fgcolor = Blitbuffer.COLOR_BLACK
+        else
+            self.label_widget.fgcolor = Blitbuffer.COLOR_GREY
+        end
     else
         self.label_widget.dim = not self.enabled
     end
@@ -152,13 +170,21 @@ end
 
 function Button:onTapSelectButton()
     if self.enabled and self.callback then
-        self[1].invert = true
-        UIManager:setDirty(self.show_parent, "partial")
+        UIManager:scheduleIn(0.0, function()
+            self[1].invert = true
+            UIManager:setDirty(self.show_parent, function()
+                return "ui", self[1].dimen
+            end)
+        end)
         UIManager:scheduleIn(0.1, function()
             self.callback()
             self[1].invert = false
-            UIManager:setDirty(self.show_parent, "partial")
+            UIManager:setDirty(self.show_parent, function()
+                return "ui", self[1].dimen
+            end)
         end)
+    elseif self.tap_input then
+        self:onInput(self.tap_input)
     end
     return true
 end
@@ -166,6 +192,8 @@ end
 function Button:onHoldSelectButton()
     if self.enabled and self.hold_callback then
         self.hold_callback()
+    elseif self.hold_input then
+        self:onInput(self.hold_input)
     end
     return true
 end

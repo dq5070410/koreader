@@ -9,8 +9,10 @@ local Menu = require("ui/widget/menu")
 local Screen = require("device").screen
 local util = require("ffi/util")
 local Font = require("ui/font")
-local DEBUG = require("dbg")
+local logger = require("logger")
+local T = require("ffi/util").template
 local _ = require("gettext")
+local SetDefaults = require("apps/filemanager/filemanagersetdefaults")
 
 local calibre = "metadata.calibre"
 local koreaderfile = "temp/metadata.koreader"
@@ -69,21 +71,21 @@ function Search:getCalibre()
     -- check if we find the calibre file
     -- check 1st file
     if SEARCH_LIBRARY_PATH == nil then
-        DEBUG("search Calibre database")
+        logger.dbg("search Calibre database")
         self.metafile_1 = findcalibre("/mnt")
         if not self.metafile_1 then
-          self.error = "SEARCH_LIBRARY_PATH in DEFAULTS.LUA is not set!"
+          self.error = _("SEARCH_LIBRARY_PATH should be defined in DEFAULTS.LUA.")
         else
-          settings_changed = true
+          SetDefaults.settings_changed = true
         end
     else
         if string.sub(SEARCH_LIBRARY_PATH,string.len(SEARCH_LIBRARY_PATH)) ~= "/" then
-            SEARCH_LIBRARY_PATH = SEARCH_LIBRARY_PATH .. "/"
+            SEARCH_LIBRARY_PATH = SEARCH_LIBRARY_PATH .. "/"  -- luacheck: ignore
         end
         if io.open(SEARCH_LIBRARY_PATH .. calibre,"r") == nil then
             if io.open(SEARCH_LIBRARY_PATH .. "." .. calibre,"r") == nil then
-                self.error = SEARCH_LIBRARY_PATH .. calibre .. " not found!"
-                DEBUG(self.error)
+                self.error = SEARCH_LIBRARY_PATH .. calibre .. " " .. _("not found.")
+                logger.err(self.error)
             else
                 self.metafile_1 = SEARCH_LIBRARY_PATH .. "." .. calibre
             end
@@ -97,7 +99,7 @@ function Search:getCalibre()
         elseif self.metafile_1 == nil then
             self.metafile_1 = findcalibre("/mnt")
             if self.metafile_1 then
-                settings_changed = true
+                SetDefaults.settings_changed = true
             end
         end
     end
@@ -105,7 +107,7 @@ function Search:getCalibre()
     local dummy
 
     if string.sub(SEARCH_LIBRARY_PATH2,string.len(SEARCH_LIBRARY_PATH2)) ~= "/" then
-        SEARCH_LIBRARY_PATH2 = SEARCH_LIBRARY_PATH2 .. "/"
+        SEARCH_LIBRARY_PATH2 = SEARCH_LIBRARY_PATH2 .. "/"  -- luacheck: ignore
     end
     if io.open(SEARCH_LIBRARY_PATH2 .. calibre,"r") == nil then
         if io.open(SEARCH_LIBRARY_PATH2 .. "." .. calibre,"r") ~= nil then
@@ -124,7 +126,7 @@ function Search:getCalibre()
     self.use_own_metadata_file = false
     if self.metafile_1 then
         pcall(lfs.mkdir("temp"))
-        if io.open(koreaderfile,"r") then
+        if io.open(koreaderfile, "r") then
             if lfs.attributes(koreaderfile).modification > lfs.attributes(self.metafile_1).modification then
                 if self.metafile_2 then
                     if lfs.attributes(koreaderfile).modification > lfs.attributes(self.metafile_2).modification then
@@ -142,7 +144,7 @@ function Search:ShowSearch()
     if self.metafile_1 ~= nil then
         local dummy = self.search_value
         self.search_dialog = InputDialog:new{
-            title = _("Search Books"),
+            title = _("Search books"),
             input = self.search_value,
             buttons = {
                 {
@@ -151,7 +153,7 @@ function Search:ShowSearch()
                         enabled = true,
                         callback = function()
                             self.search_value = self.search_dialog:getInputText()
-                            if not settings_changed and self.search_value == dummy and self.lastsearch == "series" then
+                            if not SetDefaults.settings_changed and self.search_value == dummy and self.lastsearch == "series" then
                                  self.use_previous_search_results = true
                             else
                                  self.use_previous_search_results = false
@@ -165,7 +167,7 @@ function Search:ShowSearch()
                         enabled = true,
                         callback = function()
                             self.search_value = self.search_dialog:getInputText()
-                            if not settings_changed and self.search_value == dummy and self.lastsearch == "tags" then
+                            if not SetDefaults.settings_changed and self.search_value == dummy and self.lastsearch == "tags" then
                                  self.use_previous_search_results = true
                             else
                                  self.use_previous_search_results = false
@@ -189,7 +191,7 @@ function Search:ShowSearch()
                         enabled = true,
                         callback = function()
                             self.search_value = self.search_dialog:getInputText()
-                            if not settings_changed and self.search_value == dummy and self.lastsearch == "find" then
+                            if not SetDefaults.settings_changed and self.search_value == dummy and self.lastsearch == "find" then
                                  self.use_previous_search_results = true
                             else
                                  self.use_previous_search_results = false
@@ -207,7 +209,7 @@ function Search:ShowSearch()
         UIManager:show(self.search_dialog)
     else
         if self.error then
-            UIManager:show(InfoMessage:new{text = self.error .. _( " A search for a " .. calibre .. " file was not successful!"),})
+            UIManager:show(InfoMessage:new{text = self.error .. ("\n") .. _( "Unable to find a calibre metadata file."),})
         end
     end
 
@@ -234,7 +236,6 @@ function Search:find(option)
     local line
     local i = 1
     local upsearch
-    local dummy
     local firstrun
 
     -- removes leading and closing characters and converts hex-unicodes
@@ -268,10 +269,10 @@ function Search:find(option)
                 if s == self.authors then
                     self.data[i][self.authors2] = self.data[i][self.authors2] .. " & " .. ReplaceHexChars(line,8,3)
                 elseif s == self.tags then
-                    local dummy = ReplaceHexChars(line,8,3)
-                    self.data[i][self.tags2] = self.data[i][self.tags2] .. " & " .. dummy
-                    self.data[i][self.tags3] = self.data[i][self.tags3] .. "\t" .. dummy
-                    self.browse_tags[dummy] = (self.browse_tags[dummy] or 0) + 1
+                    local tags_line = ReplaceHexChars(line,8,3)
+                    self.data[i][self.tags2] = self.data[i][self.tags2] .. " & " .. tags_line
+                    self.data[i][self.tags3] = self.data[i][self.tags3] .. "\t" .. tags_line
+                    self.browse_tags[tags_line] = (self.browse_tags[tags_line] or 0) + 1
                 end
             end
         end
@@ -301,9 +302,9 @@ function Search:find(option)
         self.data[i] = {"-","-","-","-","-","-","-","-","-"}
 
         if self.use_own_metadata_file then
-            g = io.open(koreaderfile,"r")
+            local g = io.open(koreaderfile, "r")
             line = g:read()
-            if line ~= "#metadata.Koreader Version 1.1" then
+            if line ~= "#metadata.Koreader Version 1.1" and line ~= "#metadata.koreader Version 1.1" then
                 self.use_own_metadata_file =  false
                 g:close()
             else
@@ -317,16 +318,24 @@ function Search:find(option)
                         line = g:read()
                     end
 
-                    local dummy = ""
-                    if option == "find" and SEARCH_AUTHORS then dummy = dummy .. self.data[i][self.authors] .. "\n" end
-                    if option == "find" and SEARCH_TITLE then dummy = dummy .. self.data[i][self.title] .. "\n"  end
-                    if option == "find" and SEARCH_PATH then dummy = dummy .. self.data[i][self.path] .. "\n"  end
+                    local search_content = ""
+                    if option == "find" and SEARCH_AUTHORS then
+                        search_content = search_content .. self.data[i][self.authors] .. "\n"
+                    end
+                    if option == "find" and SEARCH_TITLE then
+                        search_content = search_content .. self.data[i][self.title] .. "\n"
+                    end
+                    if option == "find" and SEARCH_PATH then
+                        search_content = search_content .. self.data[i][self.path] .. "\n"
+                    end
                     if (option == "series" or SEARCH_SERIES) and self.data[i][self.series] ~= "-" then
-                        dummy = dummy .. self.data[i][self.series] .. "\n"
+                        search_content = search_content .. self.data[i][self.series] .. "\n"
                         self.browse_series[self.data[i][self.series]] = (self.browse_series[self.data[i][self.series]] or 0) + 1
                     end
-                    if option == "tags" or SEARCH_TAGS then dummy = dummy .. self.data[i][self.tags] .. "\n" end
-                    if not SEARCH_CASESENSITIVE then dummy = string.upper(dummy) end
+                    if option == "tags" or SEARCH_TAGS then
+                        search_content = search_content .. self.data[i][self.tags] .. "\n"
+                    end
+                    if not SEARCH_CASESENSITIVE then search_content = string.upper(search_content) end
 
                     for j in string.gmatch(self.data[i][self.tags3],"\t[^\t]+") do
                         if j~="\t" then
@@ -335,7 +344,7 @@ function Search:find(option)
                     end
                     if DocumentRegistry:getProvider(self.data[i][self.path]) then
                         if upsearch ~= "" then
-                            if string.find(dummy,upsearch,nil,true) then
+                            if string.find(search_content,upsearch,nil,true) then
                                 i = i + 1
                             end
                         else
@@ -362,32 +371,32 @@ function Search:find(option)
             end
         end
         if not self.use_own_metadata_file then
-            f = io.open(self.metafile_1)
-            g = io.open(koreaderfile,"w")
-            g:write("#metadata.Koreader Version 1.1\n")
+            local g = io.open(koreaderfile, "w")
+            g:write("#metadata.koreader Version 1.1\n")
 
+            f = io.open(self.metafile_1)
             line = f:read()
             while line do
                 if line == "  }, " or line == "  }" then
                     -- new calibre data set
 
-                    dummy = ""
-                    if option == "find" and SEARCH_AUTHORS then dummy = dummy .. self.data[i][self.authors] .. "\n" end
-                    if option == "find" and SEARCH_TITLE then dummy = dummy .. self.data[i][self.title] .. "\n"  end
-                    if option == "find" and SEARCH_PATH then dummy = dummy .. self.data[i][self.path] .. "\n"  end
+                    local search_content = ""
+                    if option == "find" and SEARCH_AUTHORS then search_content = search_content .. self.data[i][self.authors] .. "\n" end
+                    if option == "find" and SEARCH_TITLE then search_content = search_content .. self.data[i][self.title] .. "\n"  end
+                    if option == "find" and SEARCH_PATH then search_content = search_content .. self.data[i][self.path] .. "\n"  end
                     if (option == "series" or SEARCH_SERIES) and self.data[i][self.series] ~= "-" then
-                        dummy = dummy .. self.data[i][self.series] .. "\n"
+                        search_content = search_content .. self.data[i][self.series] .. "\n"
                         self.browse_series[self.data[i][self.series]] = (self.browse_series[self.data[i][self.series]] or 0) + 1
                     end
-                    if option == "tags" or SEARCH_TAGS then dummy = dummy .. self.data[i][self.tags] .. "\n" end
-                    if not SEARCH_CASESENSITIVE then dummy = string.upper(dummy) end
+                    if option == "tags" or SEARCH_TAGS then search_content = search_content .. self.data[i][self.tags] .. "\n" end
+                    if not SEARCH_CASESENSITIVE then search_content = string.upper(search_content) end
 
                     for j = 1,9 do
                         g:write(self.data[i][j] .. "\n")
                     end
 
                     if upsearch ~= "" then
-                        if string.find(dummy,upsearch,nil,true) then
+                        if string.find(search_content,upsearch,nil,true) then
                             i = i + 1
                         end
                     else
@@ -442,7 +451,9 @@ function Search:find(option)
             end
             g.close()
             if lfs.attributes(koreaderfile).modification < lfs.attributes(self.metafile_1).modification then
-                lfs.touch(koreaderfile, lfs.attributes(self.metafile_1).modification + 1, lfs.attributes(self.metafile_1).modification + 1)
+                lfs.touch(koreaderfile,
+                          lfs.attributes(self.metafile_1).modification + 1,
+                          lfs.attributes(self.metafile_1).modification + 1)
             end
             if self.metafile_2 then
                 if lfs.attributes(koreaderfile).modification < lfs.attributes(self.metafile_2).modification then
@@ -461,8 +472,7 @@ function Search:find(option)
             self:browse(option,1)
         end
     else
-        dummy = _("No match for") .. " " .. self.search_value
-        UIManager:show(InfoMessage:new{text = dummy})
+        UIManager:show(InfoMessage:new{text = T(_("No match for %1."), self.search_value)})
     end
 end
 
@@ -517,10 +527,10 @@ function Search:showresults()
         self.results = {}
         local i = 1
         while i <= self.count do
-            local dummy = _("Title: ")  .. (self.data[i][self.title] or "-") .. "\n \n" ..
-                          _("Author(s):") .. " " .. (self.data[i][self.authors2] or "-") .. "\n \n" ..
-                          _("Tags:") .. " " .. (self.data[i][self.tags2] or "-") .. "\n \n" ..
-                          _("Series:") .. " " .. (self.data[i][self.series] or "-")
+            local dummy = T(_("Title: %1"), (self.data[i][self.title] or "-")) .. "\n \n" ..
+                          T(_("Author(s): %1"), (self.data[i][self.authors2] or "-")) .. "\n \n" ..
+                          T(_("Tags: %1"), (self.data[i][self.tags2] or "-")) .. "\n \n" ..
+                          T(_("Series: %1"), (self.data[i][self.series] or "-"))
             if self.data[i][self.series] ~= "-" then
                 dummy = dummy .. " (" .. tostring(self.data[i][self.series_index]):gsub(".0$","") .. ")"
             end
@@ -539,11 +549,11 @@ function Search:showresults()
         end
     end
     table.sort(self.results, function(v1,v2) return v1.text < v2.text end)
-    self.search_menu:swithItemTable(_("Search Results"), self.results)
+    self.search_menu:switchItemTable(_("Search Results"), self.results)
     UIManager:show(menu_container)
 end
 
-function Search:browse(option,run,chosen)
+function Search:browse(option, run, chosen)
     local ReaderUI = require("apps/reader/readerui")
     local restart_me = false
     local menu_container = CenterContainer:new{
@@ -613,14 +623,14 @@ function Search:browse(option,run,chosen)
         local i = 1
         while i <= self.count do
             if (option == "tags" and self.data[i][self.tags3]:find("\t" .. chosen .. "\t",nil,true)) or (option == "series" and chosen == self.data[i][self.series]) then
-                local dummy = _("Title: ")  .. (self.data[i][self.title] or "-") .. "\n \n" ..
+                local entry = _("Title: ")  .. (self.data[i][self.title] or "-") .. "\n \n" ..
                               _("Author(s):") .. " " .. (self.data[i][self.authors2] or "-") .. "\n \n" ..
                               _("Tags:") .. " " .. (self.data[i][self.tags2] or "-") .. "\n \n" ..
                               _("Series:") .. " " .. (self.data[i][self.series] or "-")
                 if self.data[i][self.series] ~= "-" then
-                    dummy = dummy .. " (" .. tostring(self.data[i][self.series_index]):gsub(".0$","") .. ")"
+                    entry = entry .. " (" .. tostring(self.data[i][self.series_index]):gsub(".0$","") .. ")"
                 end
-                dummy = dummy .. "\n \n" .. _("Path: ")
+                entry = entry .. "\n \n" .. _("Path: ")
                 local book = self.data[i][self.path]
                 local text
                 if option == "series" then
@@ -634,7 +644,7 @@ function Search:browse(option,run,chosen)
                 end
                 table.insert(self.results, {
                    text = text,
-                   info = dummy,
+                   info = entry,
                    notchecked = true,
                    path = self.data[i][self.path],
                    callback = function()
@@ -645,17 +655,17 @@ function Search:browse(option,run,chosen)
             i = i + 1
         end
     end
-    local dummy = ""
 
+    local menu_title
     if run == 1 then
-        dummy = _("Browse") .. " " .. option
+        menu_title = _("Browse") .. " " .. option
     else
-        dummy = chosen
+        menu_title = chosen
     end
 
     table.sort(self.results, function(v1,v2) return v1.text < v2.text end)
 
-    self.search_menu:swithItemTable(dummy, self.results)
+    self.search_menu:switchItemTable(menu_title, self.results)
     UIManager:show(menu_container)
 end
 

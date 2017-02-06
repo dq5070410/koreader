@@ -6,7 +6,6 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local BottomContainer = require("ui/widget/container/bottomcontainer")
 local UnderlineContainer = require("ui/widget/container/underlinecontainer")
-local HorizontalSpan = require("ui/widget/horizontalspan")
 local FocusManager = require("ui/widget/focusmanager")
 local TextWidget = require("ui/widget/textwidget")
 local OverlapGroup = require("ui/widget/overlapgroup")
@@ -24,7 +23,8 @@ local Input = require("device").input
 local UIManager = require("ui/uimanager")
 local RenderText = require("ui/rendertext")
 local InfoMessage = require("ui/widget/infomessage")
-local DEBUG = require("dbg")
+local util = require("ffi/util")
+local logger = require("logger")
 local Blitbuffer = require("ffi/blitbuffer")
 local _ = require("gettext")
 
@@ -53,7 +53,7 @@ function ItemShortCutIcon:init()
     end
 
     --@TODO calculate font size by icon size  01.05 2012 (houqp)
-    local sc_face = nil
+    local sc_face
     if self.key:len() > 1 then
         sc_face = Font:getFace("ffont", 14)
     else
@@ -81,7 +81,7 @@ NOTICE:
 @menu entry must be provided in order to close the menu
 --]]
 local MenuCloseButton = InputContainer:new{
-    align = "right",
+    overlap_align = "right",
     menu = nil,
     dimen = Geom:new{},
 }
@@ -93,7 +93,10 @@ function MenuCloseButton:init()
     }
 
     local text_size = self[1]:getSize()
-    self.dimen.w, self.dimen.h = text_size.w*2, text_size.h*2
+    self.dimen = Geom:new{
+        w = text_size.w*2,
+        h = text_size.h*2,
+    }
 
     self.ges_events.Close = {
         GestureRange:new{
@@ -165,8 +168,9 @@ function MenuItem:init()
                     ""..mandatory, true, self.bold).x
 
     local state_button_width = self.state_size.w or 0
-    w = RenderText:sizeUtf8Text(0, self.dimen.w, self.face,
-                    self.text, true, self.bold).x
+    local my_text = self.text and ""..self.text or ""
+    local w = RenderText:sizeUtf8Text(0, self.dimen.w, self.face,
+                    ""..my_text, true, self.bold).x
     if w + mandatory_w + state_button_width >= self.content_width then
         if Device:hasKeyboard() then
             self.active_key_events.ShowItemDetail = {
@@ -176,7 +180,7 @@ function MenuItem:init()
         local indicator = "  >> "
         local indicator_w = RenderText:sizeUtf8Text(0, self.dimen.w, self.face,
                         indicator, true, self.bold).x
-        self.text = RenderText:getSubTextByWidth(self.text, self.face,
+        self.text = RenderText:getSubTextByWidth(my_text, self.face,
             self.content_width - indicator_w - mandatory_w - state_button_width,
             true, self.bold) .. indicator
     end
@@ -243,7 +247,6 @@ function MenuItem:init()
             ItemShortCutIcon:new{
                 dimen = shortcut_icon_dimen,
                 key = self.shortcut,
-                radius = shortcut_icon_r,
                 style = self.shortcut_style,
             },
             HorizontalSpan:new{ width = 10 },
@@ -282,11 +285,18 @@ end
 function MenuItem:onTapSelect(arg, ges)
     local pos = self:getGesPosition(ges)
     self[1].invert = true
-    UIManager:setDirty(self.show_parent, "partial")
+    local refreshfunc = function()
+        return "ui", self[1].dimen
+    end
+    UIManager:setDirty(self.show_parent, refreshfunc)
     UIManager:scheduleIn(0.1, function()
         self[1].invert = false
-        UIManager:setDirty(self.show_parent, "partial")
-        self.menu:onMenuSelect(self.table, pos)
+        UIManager:setDirty(self.show_parent, refreshfunc)
+        logger.dbg("creating coroutine for menu select")
+        local co = coroutine.create(function()
+            self.menu:onMenuSelect(self.table, pos)
+        end)
+        coroutine.resume(co)
     end)
     return true
 end
@@ -294,10 +304,13 @@ end
 function MenuItem:onHoldSelect(arg, ges)
     local pos = self:getGesPosition(ges)
     self[1].invert = true
-    UIManager:setDirty(self.show_parent, "partial")
+    local refreshfunc = function()
+        return "ui", self[1].dimen
+    end
+    UIManager:setDirty(self.show_parent, refreshfunc)
     UIManager:scheduleIn(0.1, function()
         self[1].invert = false
-        UIManager:setDirty(self.show_parent, "partial")
+        UIManager:setDirty(self.show_parent, refreshfunc)
         self.menu:onMenuHold(self.table, pos)
     end)
     return true
@@ -322,7 +335,7 @@ local Menu = FocusManager:new{
     width = 500,
     -- height will be calculated according to item number if not given
     height = nil,
-    header_padding = Screen:scaleByDPI(10),
+    header_padding = Screen:scaleBySize(10),
     dimen = Geom:new{},
     item_table = {},
     item_shortcuts = {
@@ -358,7 +371,7 @@ function Menu:_recalculateDimen()
     self.dimen.w = self.width
     self.item_dimen = Geom:new{
         w = self.dimen.w,
-        h = Screen:scaleByDPI(46), -- hardcoded for now
+        h = Screen:scaleBySize(46), -- hardcoded for now
     }
     -- if height not given, dynamically calculate it
     self.dimen.h = self.height or (#self.item_table + 2) * self.item_dimen.h
@@ -380,7 +393,7 @@ function Menu:init()
     -- start to set up widget layout --
     -----------------------------------
     self.menu_title = TextWidget:new{
-        align = "center",
+        overlap_align = "center",
         text = self.title,
         face = self.tface,
     }
@@ -417,16 +430,32 @@ function Menu:init()
         show_parent = self,
     }
     self.page_info_spacer = HorizontalSpan:new{
-        width = Screen:scaleByDPI(32),
+        width = Screen:scaleBySize(32),
     }
     self.page_info_left_chev:hide()
     self.page_info_right_chev:hide()
     self.page_info_first_chev:hide()
     self.page_info_last_chev:hide()
 
-    self.page_info_text = TextWidget:new{
+    self.page_info_text = Button:new{
         text = "",
-        face = self.fface,
+        hold_input = {
+            title = _("Input page number"),
+            type = "number",
+            hint_func = function()
+                return "(" .. "1 - " .. self.page_num .. ")"
+            end,
+            callback = function(input)
+                local page = tonumber(input)
+                if page >= 1 and page <= self.page_num then
+                    self:onGotoPage(page)
+                end
+            end,
+        },
+        bordersize = 0,
+        text_font_face = "cfont",
+        text_font_size = 20,
+        text_font_bold = false,
     }
     self.page_info = HorizontalGroup:new{
         self.page_info_first_chev,
@@ -448,7 +477,7 @@ function Menu:init()
     self.page_return_arrow:hide()
     self.return_button = HorizontalGroup:new{
         HorizontalSpan:new{
-            width = Screen:scaleByDPI(5),
+            width = Screen:scaleBySize(5),
         },
         self.page_return_arrow,
     }
@@ -473,7 +502,7 @@ function Menu:init()
         }
     }
 
-    local content = nil
+    local content
     if self.no_title then
         content = OverlapGroup:new{
             dimen = self.dimen:copy(),
@@ -502,7 +531,7 @@ function Menu:init()
         bordersize = self.is_borderless and 0 or 2,
         padding = 0,
         margin = 0,
-        radius = math.floor(self.dimen.w/20),
+        radius = self.is_popout and math.floor(self.dimen.w/20) or 0,
         content
     }
 
@@ -512,9 +541,7 @@ function Menu:init()
     if Device:isTouchDevice() then
         if self.has_close_button then
             table.insert(self.title_bar,
-                MenuCloseButton:new{
-                    menu = self,
-                })
+                         MenuCloseButton:new{ menu = self })
         end
         -- watch for outer region if it's a self contained widget
         if self.is_popout then
@@ -568,11 +595,27 @@ function Menu:init()
         -- if the table is not yet initialized, this call
         -- must be done manually:
         self.page = math.ceil((self.item_table.current or 1) / self.perpage)
+    end
+    if self.path_items then
+        self:refreshPath()
+    else
         self:updateItems(1)
     end
 end
 
+function Menu:onCloseWidget()
+    -- FIXME:
+    -- we cannot refresh regionally using the dimen field
+    -- because some menus without menu title use VerticalGroup to include
+    -- a text widget which is not calculated into the dimen.
+    -- For example, it's a dirty hack to use two menus(one this menu and one
+    -- touch menu) in the filemanager in order to capture tap gesture to popup
+    -- the filemanager menu.
+    UIManager:setDirty(nil, "partial")
+end
+
 function Menu:updateItems(select_number)
+    local old_dimen = self.dimen and self.dimen:copy()
     -- self.layout must be updated for focusmanager
     self.layout = {}
     self.item_group:clear()
@@ -585,7 +628,7 @@ function Menu:updateItems(select_number)
         select_number = 1
     end
 
-    for c = 1, self.perpage do
+    for c = 1, math.min(self.perpage, #self.item_table) do
         -- calculate index in item_table
         local i = (self.page - 1) * self.perpage + c
         if i <= #self.item_table then
@@ -609,7 +652,7 @@ function Menu:updateItems(select_number)
                 state_size = self.state_size or {},
                 text = self.item_table[i].text,
                 mandatory = self.item_table[i].mandatory,
-                bold = self.item_table.current == i,
+                bold = self.item_table.current == i or self.item_table[i].bold == true,
                 face = self.cface,
                 dimen = self.item_dimen:new(),
                 shortcut = item_shortcut,
@@ -631,7 +674,7 @@ function Menu:updateItems(select_number)
             self.item_group[select_number]:onFocus()
         end
         -- update page information
-        self.page_info_text.text = _("page ")..self.page.."/"..self.page_num
+        self.page_info_text:setText(util.template(_("page %1 of %2"), self.page, self.page_num))
         self.page_info_left_chev:showHide(self.page_num > 1)
         self.page_info_right_chev:showHide(self.page_num > 1)
         self.page_info_first_chev:showHide(self.page_num > 2)
@@ -644,16 +687,18 @@ function Menu:updateItems(select_number)
         self.page_info_last_chev:enableDisable(self.page < self.page_num)
         self.page_return_arrow:enableDisable(#self.paths > 0)
     else
-        self.page_info_text.text = _("no choices available")
+        self.page_info_text:setText(_("No choices available"))
     end
 
-    -- nicolua
-    -- FIXME: dirty hack to clear previous menus
-    UIManager:setDirty(self.show_parent or self)
+    UIManager:setDirty("all", function()
+        local refresh_dimen =
+            old_dimen and old_dimen:combine(self.dimen)
+            or self.dimen
+        return "ui", refresh_dimen
+    end)
 end
 
 --[[
-    May be a typo of switchItemTable?
     the itemnumber paramter determines menu page number after switching item table
     1. itemnumber >= 0
         the page number is calculated with items per page
@@ -663,7 +708,7 @@ end
         the page number is not changed, used when item_table is appended with
         new entries
 --]]
-function Menu:swithItemTable(new_title, new_item_table, itemnumber)
+function Menu:switchItemTable(new_title, new_item_table, itemnumber)
     if self.menu_title and new_title then
         self.menu_title.text = new_title
     end
@@ -672,6 +717,12 @@ function Menu:swithItemTable(new_title, new_item_table, itemnumber)
         self.page = 1
     elseif itemnumber >= 0 then
         self.page = math.ceil(itemnumber / self.perpage)
+    end
+
+    -- make sure current page is in right page range
+    local max_pages = math.ceil(#new_item_table / self.perpage)
+    if self.page > max_pages then
+        self.page = max_pages
     end
 
     self.item_table = new_item_table
@@ -722,7 +773,7 @@ function Menu:onMenuSelect(item)
         -- save menu title for later resume
         self.item_table.title = self.title
         table.insert(self.item_table_stack, self.item_table)
-        self:swithItemTable(item.text, item.sub_item_table)
+        self:switchItemTable(item.text, item.sub_item_table)
     end
     return true
 end
@@ -761,6 +812,8 @@ function Menu:onNextPage()
         if end_position ~= self.selected.y then
             self:updateItems(end_position)
         end
+        self.page = 1
+        self:updateItems(1)
     end
     return true
 end
@@ -768,6 +821,8 @@ end
 function Menu:onPrevPage()
     if self.page > 1 then
         self.page = self.page - 1
+    elseif self.page == 1 then
+        self.page = self.page_num
     end
     self:updateItems(1)
     return true
@@ -785,8 +840,17 @@ function Menu:onLastPage()
     return true
 end
 
+function Menu:onGotoPage(page)
+    self.page = page
+    self:updateItems(1)
+    return true
+end
+
 function Menu:onSelect()
-    self:onMenuSelect(self.item_table[(self.page-1)*self.perpage+self.selected.y])
+    local item = self.item_table[(self.page-1)*self.perpage+self.selected.y]
+    if item then
+        self:onMenuSelect(item)
+    end
     return true
 end
 
@@ -796,8 +860,8 @@ function Menu:onClose()
         self:onCloseAllMenus()
     else
         -- back to parent menu
-        parent_item_table = table.remove(self.item_table_stack, table_length)
-        self:swithItemTable(parent_item_table.title, parent_item_table)
+        local parent_item_table = table.remove(self.item_table_stack, table_length)
+        self:switchItemTable(parent_item_table.title, parent_item_table)
     end
     return true
 end
@@ -819,17 +883,9 @@ end
 
 function Menu:onSwipe(arg, ges_ev)
     if ges_ev.direction == "west" then
-        if DCHANGE_WEST_SWIPE_TO_EAST then
-            self:onPrevPage()
-        else
-            self:onNextPage()
-        end
+        self:onNextPage()
     elseif ges_ev.direction == "east" then
-        if DCHANGE_WEST_SWIPE_TO_EAST then
-            self:onNextPage()
-        else
-            self:onPrevPage()
-        end
+        self:onPrevPage()
     end
 end
 

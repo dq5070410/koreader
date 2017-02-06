@@ -1,20 +1,39 @@
+--[[--
+WidgetContainer is a container for one or multiple Widgets. It is the base
+class for all the container widgets.
+
+Child widgets are stored in WidgetContainer as conventional array items:
+
+    WidgetContainer:new{
+        ChildWidgetFoo:new{},
+        ChildWidgetBar:new{},
+        ...
+    }
+
+It handles event propagation and painting (with different alignments) for its children.
+]]
+
 local Geom = require("ui/geometry")
 local Widget = require("ui/widget/widget")
 
---[[
-WidgetContainer is a container for another Widget
---]]
+if require("device"):isAndroid() then
+    require("jit").off(true, true)
+end
+
 local WidgetContainer = Widget:new()
 
 function WidgetContainer:init()
-    if not self.dimen then
-        self.dimen = Geom:new{}
-    end
-    if not self.dimen.w then
-        self.dimen.w = self[1].getSize().w
-    end
-    if not self.dimen.h then
-        self.dimen.h = self[1].getSize().h
+    if self.dimen then
+        if self.initDimen then
+            self:initDimen()
+        else
+            if not self.dimen.w then
+                self.dimen.w = self[1]:getSize().w
+            end
+            if not self.dimen.h then
+                self.dimen.h = self[1]:getSize().h
+            end
+        end
     end
 end
 
@@ -30,9 +49,9 @@ function WidgetContainer:getSize()
     end
 end
 
---[[
-delete all child widgets
---]]
+--[[--
+Delete all child widgets
+]]
 function WidgetContainer:clear()
     while table.remove(self) do end
 end
@@ -73,9 +92,15 @@ function WidgetContainer:propagateEvent(event)
     return false
 end
 
---[[
-Containers will pass events to children or react on them themselves
---]]
+--[[--
+WidgetContainer will pass event to its children by calling their handleEvent
+methods. If no child consumes the event (by returning true), it will try
+to react to the event by itself.
+
+@tparam ui.event.Event event
+@treturn bool true if event is consumed, othewise false. A consumed event will
+not be sent to other widgets.
+]]
 function WidgetContainer:handleEvent(event)
     if not self:propagateEvent(event) then
         -- call our own standard event handler

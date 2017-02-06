@@ -1,5 +1,5 @@
 local isAndroid, android = pcall(require, "android")
-local DEBUG = require("dbg")
+local logger = require("logger")
 
 local GetText = {
     translation = {},
@@ -49,7 +49,7 @@ function GetText_mt.__index.changeLang(new_lang)
     local po = io.open(file, "r")
 
     if not po then
-        DEBUG("cannot open translation file " .. file)
+        logger.err("cannot open translation file:", file)
         return
     end
 
@@ -77,6 +77,8 @@ function GetText_mt.__index.changeLang(new_lang)
                     s = line:match("^%s*\"(.*)\"%s*$")
                 end
                 if what and s then
+                    -- unescape \n or msgid won't match
+                    s = s:gsub("\\n", "\n")
                     data[what] = (data[what] or "") .. s
                 end
             end

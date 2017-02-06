@@ -46,7 +46,7 @@ function InfoMessage:init()
             }
         }
     end
-    local image_widget = nil
+    local image_widget
     if self.image then
         image_widget = ImageWidget:new{
             image = self.image,
@@ -78,8 +78,18 @@ function InfoMessage:init()
     }
 end
 
+function InfoMessage:onCloseWidget()
+    UIManager:setDirty(nil, function()
+        return "partial", self[1][1].dimen
+    end)
+    return true
+end
+
 function InfoMessage:onShow()
     -- triggered by the UIManager after we got successfully shown (not yet painted)
+    UIManager:setDirty(self, function()
+        return "ui", self[1][1].dimen
+    end)
     if self.timeout then
         UIManager:scheduleIn(self.timeout, function() UIManager:close(self) end)
     end

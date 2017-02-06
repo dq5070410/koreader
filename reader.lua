@@ -1,27 +1,31 @@
 #!./luajit
+io.stdout:write([[
+---------------------------------------------
+                launching...
+  _  _____  ____                _
+ | |/ / _ \|  _ \ ___  __ _  __| | ___ _ __
+ | ' / | | | |_) / _ \/ _` |/ _` |/ _ \ '__|
+ | . \ |_| |  _ <  __/ (_| | (_| |  __/ |
+ |_|\_\___/|_| \_\___|\__,_|\__,_|\___|_|
 
-require "defaults"
-pcall(dofile, "defaults.persistent.lua")
-package.path = "?.lua;common/?.lua;frontend/?.lua"
-package.cpath = "?.so;common/?.so;common/?.dll;/usr/lib/lua/?.so"
+ [*] Current time: ]], os.date("%x-%X"), "\n\n")
+io.stdout:flush()
 
-local ffi = require("ffi")
-if ffi.os == "Windows" then
-    ffi.cdef[[
-        int _putenv(const char *envvar);
-    ]]
-    ffi.C._putenv("PATH=libs;common;")
-    --ffi.C._putenv("EMULATE_READER_W=480")
-    --ffi.C._putenv("EMULATE_READER_H=600")
-end
 
-local DocSettings = require("docsettings")
-local _ = require("gettext")
+-- load default settings
+require("defaults")
+local DataStorage = require("datastorage")
+pcall(dofile, DataStorage:getDataDir() .. "/defaults.persistent.lua")
+
+require("setupkoenv")
+
 -- read settings and check for language override
 -- has to be done before requiring other files because
 -- they might call gettext on load
-G_reader_settings = DocSettings:open(".reader")
+G_reader_settings = require("luasettings"):open(
+    DataStorage:getDataDir().."/settings.reader.lua")
 local lang_locale = G_reader_settings:readSetting("language")
+local _ = require("gettext")
 if lang_locale then
     _.changeLang(lang_locale)
 end
@@ -38,6 +42,7 @@ local function showusage()
     print("Read all the books on your E-Ink reader")
     print("")
     print("-d               start in debug mode")
+    print("-v               debug in verbose mode")
     print("-p               enable Lua code profiling")
     print("-h               show this usage help")
     print("")
@@ -48,12 +53,12 @@ local function showusage()
     print("")
     print("This software is licensed under the AGPLv3.")
     print("See http://github.com/koreader/koreader for more info.")
-    return
 end
 
 -- should check DEBUG option in arg and turn on DEBUG before loading other
 -- modules, otherwise DEBUG in some modules may not be printed.
-local DEBUG = require("dbg")
+local dbg = require("dbg")
+if G_reader_settings:readSetting("debug") then dbg:turnOn() end
 
 local Profiler = nil
 local ARGV = arg
@@ -71,7 +76,9 @@ while argidx <= #ARGV do
     if arg == "-h" then
         return showusage()
     elseif arg == "-d" then
-        DEBUG:turnOn()
+        dbg:turnOn()
+    elseif arg == "-v" then
+        dbg:setVerbose(true)
     elseif arg == "-p" then
         Profiler = require("jit.p")
         Profiler.start("la")
@@ -85,14 +92,15 @@ end
 local lfs = require("libs/libkoreader-lfs")
 local UIManager = require("ui/uimanager")
 local Device = require("device")
-local Screen = require("device").screen
 local Font = require("ui/font")
 
 -- read some global reader setting here:
 -- font
 local fontmap = G_reader_settings:readSetting("fontmap")
 if fontmap ~= nil then
-    Font.fontmap = fontmap
+    for k, v in pairs(fontmap) do
+        Font.fontmap[k] = v
+    end
 end
 -- last file
 local last_file = G_reader_settings:readSetting("lastfile")
@@ -103,18 +111,35 @@ end
 local open_last = G_reader_settings:readSetting("open_last")
 -- night mode
 if G_reader_settings:readSetting("night_mode") then
-    Screen.bb:invert()
+    Device.screen:toggleNightMode()
 end
 
--- restore kobo frontlight settings
+-- restore kobo frontlight settings and probe kobo touch coordinates
 if Device:isKobo() then
-    local powerd = Device:getPowerDevice()
-    if powerd and powerd.restore_settings then
-        local intensity = G_reader_settings:readSetting("frontlight_intensity")
-        intensity = intensity or powerd.flIntensity
-        powerd:setIntensityWithoutHW(intensity)
-        -- powerd:setIntensity(intensity)
+    if Device:hasFrontlight() then
+        local powerd = Device:getPowerDevice()
+        if powerd and powerd.restore_settings then
+            -- UIManager:init() should have sanely set up the frontlight_stuff by this point
+            local intensity = G_reader_settings:readSetting("frontlight_intensity")
+            powerd.fl_intensity = intensity or powerd.fl_intensity
+            local is_frontlight_on = G_reader_settings:readSetting("is_frontlight_on")
+            if is_frontlight_on then
+                -- default powerd.is_fl_on is false, turn it on
+                powerd:toggleFrontlight()
+            else
+                -- the light can still be turned on manually outside of KOReader
+                -- or Nickel. so we always set the intensity to 0 here to keep it
+                -- in sync with powerd.is_fl_on (false by default)
+                -- NOTE: we cant use setIntensity method here because for Kobo the
+                -- min intensity is 1 :(
+                powerd.fl:setBrightness(0)
+            end
+        end
     end
+end
+
+if Device:needsTouchScreenProbe() then
+    Device:touchScreenProbe()
 end
 
 if ARGV[argidx] and ARGV[argidx] ~= "" then
@@ -124,28 +149,37 @@ if ARGV[argidx] and ARGV[argidx] ~= "" then
     elseif open_last and last_file then
         file = last_file
     end
-    -- if file is given in command line argument or open last document is set true
-    -- the given file or the last file is opened in the reader
+    -- if file is given in command line argument or open last document is set
+    -- true, the given file or the last file is opened in the reader
     if file then
         local ReaderUI = require("apps/reader/readerui")
-        ReaderUI:showReader(file)
+        UIManager:nextTick(function()
+            ReaderUI:showReader(file)
+        end)
     -- we assume a directory is given in command line argument
     -- the filemanger will show the files in that path
     else
         local FileManager = require("apps/filemanager/filemanager")
-        FileManager:showFiles(ARGV[argidx])
+        local home_dir =
+            G_reader_settings:readSetting("home_dir") or ARGV[argidx]
+        UIManager:nextTick(function()
+            FileManager:showFiles(home_dir)
+        end)
     end
     UIManager:run()
 elseif last_file then
     local ReaderUI = require("apps/reader/readerui")
-    ReaderUI:showReader(last_file)
+    UIManager:nextTick(function()
+        ReaderUI:showReader(last_file)
+    end)
     UIManager:run()
 else
     return showusage()
 end
 
 local function exitReader()
-    local ReaderActivityIndicator = require("apps/reader/modules/readeractivityindicator")
+    local ReaderActivityIndicator =
+        require("apps/reader/modules/readeractivityindicator")
 
     G_reader_settings:close()
 
@@ -154,6 +188,7 @@ local function exitReader()
 
     -- shutdown hardware abstraction
     Device:exit()
+    require("ui/network/manager"):turnOffWifi()
 
     if Profiler then Profiler.stop() end
     os.exit(0)

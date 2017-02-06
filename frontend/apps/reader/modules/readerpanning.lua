@@ -1,6 +1,5 @@
 local InputContainer = require("ui/widget/container/inputcontainer")
 local Device = require("device")
-local DEBUG = require("dbg")
 local _ = require("gettext")
 
 local ReaderPanning = InputContainer:new{
@@ -14,8 +13,7 @@ local ReaderPanning = InputContainer:new{
 }
 
 function ReaderPanning:init()
-    if Device:isTouchDevice() then
-    else
+    if Device:hasKeyboard() then
         self.key_events = {
             -- these will all generate the same event, just with different arguments
             MoveUp = {
@@ -38,9 +36,8 @@ function ReaderPanning:onSetDimensions(dimensions)
     self.dimen = dimensions
 end
 
-function ReaderPanning:onPanning(args, key)
+function ReaderPanning:onPanning(args, _)
     local dx, dy = unpack(args)
-    DEBUG("key =", key)
     -- for now, bounds checking/calculation is done in the view
     self.view:PanningUpdate(
         dx * self.panning_steps.normal * self.dimen.w / 100,

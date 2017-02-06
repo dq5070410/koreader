@@ -1,6 +1,8 @@
 local InputContainer = require("ui/widget/container/inputcontainer")
 local DocumentRegistry = require("document/documentregistry")
+local Screenshoter = require("ui/widget/screenshoter")
 local InfoMessage = require("ui/widget/infomessage")
+local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local lfs = require("libs/libkoreader-lfs")
 local DocSettings = require("docsettings")
@@ -10,7 +12,8 @@ local Device = require("device")
 local Screen = require("device").screen
 local Event = require("ui/event")
 local Cache = require("cache")
-local DEBUG = require("dbg")
+local logger = require("logger")
+local T = require("ffi/util").template
 local _ = require("gettext")
 
 local ReaderView = require("apps/reader/modules/readerview")
@@ -31,7 +34,6 @@ local ReaderKoptListener = require("apps/reader/modules/readerkoptlistener")
 local ReaderCoptListener = require("apps/reader/modules/readercoptlistener")
 local ReaderHinting = require("apps/reader/modules/readerhinting")
 local ReaderHighlight = require("apps/reader/modules/readerhighlight")
-local ReaderScreenshot = require("apps/reader/modules/readerscreenshot")
 local ReaderFrontLight = require("apps/reader/modules/readerfrontlight")
 local ReaderDictionary = require("apps/reader/modules/readerdictionary")
 local ReaderWikipedia = require("apps/reader/modules/readerwikipedia")
@@ -40,7 +42,8 @@ local ReaderActivityIndicator = require("apps/reader/modules/readeractivityindic
 local FileManagerHistory = require("apps/filemanager/filemanagerhistory")
 local ReaderSearch = require("apps/reader/modules/readersearch")
 local ReaderLink = require("apps/reader/modules/readerlink")
-local PluginLoader = require("apps/reader/pluginloader")
+local ReaderStatus = require("apps/reader/modules/readerstatus")
+local PluginLoader = require("pluginloader")
 
 --[[
 This is an abstraction for a reader interface
@@ -49,6 +52,8 @@ it works using data gathered from a document interface
 ]]--
 
 local ReaderUI = InputContainer:new{
+    name = "ReaderUI",
+
     key_events = {
         Close = { { "Home" },
             doc = "close document", event = "Close" },
@@ -69,9 +74,10 @@ local ReaderUI = InputContainer:new{
     postInitCallback = nil,
 }
 
-function ReaderUI:registerModule(name, module, always_active)
-    if name then self[name] = module end
-    table.insert(always_active and self.active_widgets or self, module)
+function ReaderUI:registerModule(name, ui_module, always_active)
+    if name then self[name] = ui_module end
+    ui_module.name = "reader" .. name
+    table.insert(always_active and self.active_widgets or self, ui_module)
 end
 
 function ReaderUI:registerPostInitCallback(callback)
@@ -94,6 +100,7 @@ function ReaderUI:init()
     self.doc_settings = DocSettings:open(self.document.file)
 
     -- a view container (so it must be child #1!)
+    -- all paintable widgets need to be a child of reader view
     self:registerModule("view", ReaderView:new{
         dialog = self.dialog,
         dimen = self.dimen,
@@ -162,17 +169,12 @@ function ReaderUI:init()
         document = self.document,
     })
     -- screenshot controller
-    self:registerModule("screenshot", ReaderScreenshot:new{
+    self:registerModule("screenshot", Screenshoter:new{
+        prefix = 'Reader',
         dialog = self.dialog,
         view = self.view,
         ui = self
     }, true)
-    -- history view
-    self:registerModule("history", FileManagerHistory:new{
-        dialog = self.dialog,
-        menu = self.menu,
-        ui = self,
-    })
     -- frontlight controller
     if Device:hasFrontlight() then
         self:registerModule("frontlight", ReaderFrontLight:new{
@@ -254,6 +256,12 @@ function ReaderUI:init()
     else
         -- make sure we render document first before calling any callback
         self:registerPostInitCallback(function()
+            self.document:loadDocument()
+
+            -- used to read additional settings after the document has been
+            -- loaded (but not rendered yet)
+            self:handleEvent(Event:new("PreRenderDocument", self.doc_settings))
+
             self.document:render()
         end)
         -- typeset controller
@@ -280,6 +288,7 @@ function ReaderUI:init()
             view = self.view,
             ui = self
         })
+        self.disable_double_tap = G_reader_settings:readSetting("disable_double_tap") ~= false
     end
     -- fulltext search
     self:registerModule("search", ReaderSearch:new{
@@ -287,11 +296,21 @@ function ReaderUI:init()
         view = self.view,
         ui = self
     })
-
+    -- book status
+    self:registerModule("status", ReaderStatus:new{
+        ui = self,
+        document = self.document,
+        view = self.view,
+    })
+    -- history view
+    self:registerModule("history", FileManagerHistory:new{
+        dialog = self.dialog,
+        ui = self,
+    })
     -- koreader plugins
-    for _,module in ipairs(PluginLoader:loadPlugins()) do
-        DEBUG("Loaded plugin", module.name, "at", module.path)
-        self:registerModule(module.name, module:new{
+    for _,plugin_module in ipairs(PluginLoader:loadPlugins()) do
+        logger.info("RD loaded plugin", plugin_module.name, "at", plugin_module.path)
+        self:registerModule(plugin_module.name, plugin_module:new{
             dialog = self.dialog,
             view = self.view,
             ui = self,
@@ -299,43 +318,72 @@ function ReaderUI:init()
         })
     end
 
-    --DEBUG(self.doc_settings)
     -- we only read settings after all the widgets are initialized
     self:handleEvent(Event:new("ReadSettings", self.doc_settings))
 
     for _,v in ipairs(self.postInitCallback) do
         v()
     end
+
+    -- After initialisation notify that document is loaded and rendered
+    -- CREngine only reports correct page count after rendering is done
+    -- Need the same event for PDF document
+    self:handleEvent(Event:new("ReaderReady", self.doc_settings))
 end
 
 function ReaderUI:showReader(file)
-    DEBUG("show reader ui")
+    logger.dbg("show reader ui")
+    require("readhistory"):addItem(file)
     if lfs.attributes(file, "mode") ~= "file" then
         UIManager:show(InfoMessage:new{
-             text = _("File ") .. file .. _(" does not exist")
+             text = T(_("File '%1' does not exist."), file)
         })
         return
     end
     UIManager:show(InfoMessage:new{
-        text = _("Opening file ") .. file,
-        timeout = 1,
+        text = T(_("Opening file '%1'."), file),
+        timeout = 0.0,
     })
-    UIManager:scheduleIn(0.1, function() self:doShowReader(file) end)
+    -- doShowReader might block for a long time, so force repaint here
+    UIManager:forceRePaint()
+    UIManager:nextTick(function()
+        logger.dbg("creating coroutine for showing reader")
+        local co = coroutine.create(function()
+            self:doShowReader(file)
+        end)
+        local ok, err = coroutine.resume(co)
+        if err ~= nil or ok == false then
+            io.stderr:write('[!] doShowReader coroutine crashed:\n')
+            io.stderr:write(debug.traceback(co, err, 1))
+            UIManager:quit()
+        end
+    end)
 end
 
-local running_instance = nil
+local _running_instance = nil
 function ReaderUI:doShowReader(file)
-    DEBUG("opening file", file)
+    logger.info("opening file", file)
     -- keep only one instance running
-    if running_instance then
-        running_instance:onClose()
+    if _running_instance then
+        _running_instance:onClose()
     end
     local document = DocumentRegistry:openDocument(file)
     if not document then
         UIManager:show(InfoMessage:new{
-            text = _("No reader engine for this file")
+            text = _("No reader engine for this file.")
         })
         return
+    end
+    if document.is_locked then
+        logger.info("document is locked")
+        self._coroutine = coroutine.running() or self._coroutine
+        self:unlockDocumentWithPassword(document)
+        if coroutine.running() then
+            local unlock_success = coroutine.yield()
+            if not unlock_success then
+                return
+            end
+        end
     end
 
     G_reader_settings:saveSetting("lastfile", file)
@@ -344,11 +392,62 @@ function ReaderUI:doShowReader(file)
         document = document,
     }
     UIManager:show(reader)
-    running_instance = reader
+    _running_instance = reader
 end
 
-function ReaderUI:onSetDimensions(dimen)
+function ReaderUI:_getRunningInstance()
+    return _running_instance
+end
+
+function ReaderUI:unlockDocumentWithPassword(document, try_again)
+    logger.dbg("show input password dialog")
+    self.password_dialog = InputDialog:new{
+        title = try_again and _("Password is incorrect, try again?")
+            or _("Input document password"),
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    enabled = true,
+                    callback = function()
+                        self:closeDialog()
+                        coroutine.resume(self._coroutine)
+                    end,
+                },
+                {
+                    text = _("OK"),
+                    enabled = true,
+                    callback = function()
+                        local success = self:onVerifyPassword(document)
+                        self:closeDialog()
+                        if success then
+                            coroutine.resume(self._coroutine, success)
+                        else
+                            self:unlockDocumentWithPassword(document, true)
+                        end
+                    end,
+                },
+            },
+        },
+        text_type = "password",
+    }
+    self.password_dialog:onShowKeyboard()
+    UIManager:show(self.password_dialog)
+end
+
+function ReaderUI:onVerifyPassword(document)
+    local password = self.password_dialog:getInputText()
+    return document:unlock(password)
+end
+
+function ReaderUI:closeDialog()
+    self.password_dialog:onClose()
+    UIManager:close(self.password_dialog)
+end
+
+function ReaderUI:onScreenResize(dimen)
     self.dimen = dimen
+    self:updateTouchZonesOnScreenResize(dimen)
 end
 
 function ReaderUI:saveSettings()
@@ -367,36 +466,47 @@ function ReaderUI:closeDocument()
     self.document = nil
 end
 
-function ReaderUI:onCloseDocument()
+function ReaderUI:notifyCloseDocument()
+    self:handleEvent(Event:new("CloseDocument"))
     if self.document:isEdited() then
-        UIManager:show(ConfirmBox:new{
-            text = _("Do you want to save this document?"),
-            ok_text = _("Yes"),
-            cancel_text = _("No"),
-            ok_callback = function()
-                self:closeDocument()
-            end,
-            cancel_callback = function()
-                self.document:discardChange()
-                self:closeDocument()
-            end,
-        })
+        local setting = G_reader_settings:readSetting("save_document")
+        if setting == "always" then
+            self:closeDocument()
+        elseif setting == "disable" then
+            self.document:discardChange()
+            self:closeDocument()
+        else
+            UIManager:show(ConfirmBox:new{
+                text = _("Do you want to save this document?"),
+                ok_text = _("Yes"),
+                cancel_text = _("No"),
+                ok_callback = function()
+                    self:closeDocument()
+                end,
+                cancel_callback = function()
+                    self.document:discardChange()
+                    self:closeDocument()
+                end,
+            })
+        end
     else
         self:closeDocument()
     end
 end
 
 function ReaderUI:onClose()
-    DEBUG("closing reader")
+    logger.dbg("closing reader")
     self:saveSettings()
     if self.document ~= nil then
-        DEBUG("closing document")
-        self:onCloseDocument()
+        logger.dbg("closing document")
+        self:notifyCloseDocument()
     end
-    UIManager:close(self.dialog)
+    UIManager:close(self.dialog, "full")
     -- serialize last used items for later launch
     Cache:serialize()
-    running_instance = nil
+    if _running_instance == self then
+        _running_instance = nil
+    end
     return true
 end
 

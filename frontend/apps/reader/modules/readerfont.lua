@@ -1,15 +1,14 @@
 local InputContainer = require("ui/widget/container/inputcontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Notification = require("ui/widget/notification")
-local ConfirmBox = require("ui/widget/confirmbox")
+local MultiConfirmBox = require("ui/widget/multiconfirmbox")
 local Menu = require("ui/widget/menu")
 local Device = require("device")
 local Screen = require("device").screen
 local Input = require("device").input
 local Event = require("ui/event")
 local UIManager = require("ui/uimanager")
-local Screen = require("device").screen
-local DEBUG = require("dbg")
+local T = require("ffi/util").template
 local _ = require("gettext")
 
 local ReaderFont = InputContainer:new{
@@ -57,6 +56,9 @@ function ReaderFont:init()
             hold_callback = function()
                 self:makeDefault(v)
             end,
+            checked_func = function()
+                return v == self.font_face
+            end
         })
         face_list[k] = {text = v}
     end
@@ -77,8 +79,9 @@ function ReaderFont:onReadSettings(config)
     self.ui.document:setHeaderFont(self.header_font_face)
 
     self.font_size = config:readSetting("font_size")
+            or G_reader_settings:readSetting("copt_font_size")
             or DCREREADER_CONFIG_DEFAULT_FONT_SIZE or 22
-    self.ui.document:setFontSize(Screen:scaleByDPI(self.font_size))
+    self.ui.document:setFontSize(Screen:scaleBySize(self.font_size))
 
     self.font_embolden = config:readSetting("font_embolden")
             or G_reader_settings:readSetting("copt_font_weight") or 0
@@ -94,7 +97,7 @@ function ReaderFont:onReadSettings(config)
             or DCREREADER_CONFIG_DEFAULT_FONT_GAMMA
     self.ui.document:setGammaIndex(self.gamma_index)
 
-    -- Dirty hack: we have to add folloing call in order to set
+    -- Dirty hack: we have to add following call in order to set
     -- m_is_rendered(member of LVDocView) to true. Otherwise position inside
     -- document will be reset to 0 on first view render.
     -- So far, I don't know why this call will alter the value of m_is_rendered.
@@ -143,10 +146,10 @@ function ReaderFont:onSetFontSize(new_size)
 
     self.font_size = new_size
     UIManager:show(Notification:new{
-        text = _("Set font size to ")..self.font_size,
+        text = T( _("Font size set to %1."), self.font_size),
         timeout = 1,
     })
-    self.ui.document:setFontSize(Screen:scaleByDPI(new_size))
+    self.ui.document:setFontSize(Screen:scaleBySize(new_size))
     self.ui:handleEvent(Event:new("UpdatePos"))
 
     return true
@@ -155,7 +158,7 @@ end
 function ReaderFont:onSetLineSpace(space)
     self.line_space_percent = math.min(200, math.max(80, space))
     UIManager:show(Notification:new{
-        text = _("Set line space to ")..self.line_space_percent.."%",
+        text = T( _("Line spacing set to %1%."), self.line_space_percent),
         timeout = 1,
     })
     self.ui.document:setInterlineSpacePercent(self.line_space_percent)
@@ -173,7 +176,7 @@ end
 function ReaderFont:onSetFontGamma(gamma)
     self.gamma_index = gamma
     UIManager:show(Notification:new{
-        text = _("Set font gamma to ")..self.gamma_index,
+        text = T( _("Font gamma set to %1."), self.gamma_index),
         timeout = 1
     })
     self.ui.document:setGammaIndex(self.gamma_index)
@@ -194,7 +197,7 @@ function ReaderFont:setFont(face)
     if face and self.font_face ~= face then
         self.font_face = face
         UIManager:show(Notification:new{
-            text = _("Redrawing with font ")..face,
+            text = T( _("Redrawing with font %1."), face),
             timeout = 1,
         })
 
@@ -206,10 +209,15 @@ end
 
 function ReaderFont:makeDefault(face)
     if face then
-        UIManager:show(ConfirmBox:new{
-            text = _("Set default font to ")..face.."?",
-            ok_callback = function()
+        UIManager:show(MultiConfirmBox:new{
+            text = T( _("Set %1 as fallback font? Characters not found in the active font are shown in the fallback font instead."), face),
+            choice1_text = _("Default"),
+            choice1_callback = function()
                 G_reader_settings:saveSetting("cre_font", face)
+            end,
+            choice2_text = _("Fallback"),
+            choice2_callback = function()
+                G_reader_settings:saveSetting("fallback_font", face)
             end,
         })
     end

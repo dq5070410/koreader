@@ -1,27 +1,30 @@
 local InputContainer = require("ui/widget/container/inputcontainer")
 local LoginDialog = require("ui/widget/logindialog")
 local InfoMessage = require("ui/widget/infomessage")
+local NetworkMgr = require("ui/network/manager")
+local DataStorage = require("datastorage")
 local DocSettings = require("docsettings")
-local NetworkMgr = require("ui/networkmgr")
 local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
-local Event = require("ui/event")
+local util = require("ffi/util")
+local Device = require("device")
 local DEBUG = require("dbg")
+local T = require("ffi/util").template
 local _ = require("gettext")
-
 local slt2 = require('slt2')
 local MyClipping = require("clip")
+local realpath = require("ffi/util").realpath
 
 local EvernoteExporter = InputContainer:new{
     name = "evernote",
     login_title = _("Login to Evernote"),
-    notebook_name = _("Koreader Notes"),
+    notebook_name = _("KOReader Notes"),
     evernote_domain = nil,
     notemarks = _("Note: "),
-    clipping_dir = "./clipboard",
+    clipping_dir = DataStorage:getDataDir() .. "/clipboard",
 
-    evernote_token,
-    notebook_guid,
+    evernote_token = nil,
+    notebook_guid = nil,
 }
 
 function EvernoteExporter:init()
@@ -33,13 +36,36 @@ function EvernoteExporter:init()
     self.evernote_token = settings.token
     self.notebook_guid = settings.notebook
     self.html_export = settings.html_export or false
+    if self.html_export then
+        self.txt_export = false
+    else
+        self.txt_export = settings.txt_export or false
+    end
 
     self.parser = MyClipping:new{
         my_clippings = "/mnt/us/documents/My Clippings.txt",
         history_dir = "./history",
     }
     self.template = slt2.loadfile(self.path.."/note.tpl")
-    self.config = DocSettings:open(self.path)
+    self:migrateClippings()
+    self.config = DocSettings:open(util.joinPath(self.clipping_dir, "evernote.sdr"))
+end
+
+function EvernoteExporter:isDocless()
+    return self.ui == nil or self.ui.document == nil or self.view == nil
+end
+
+function EvernoteExporter:readyToExport()
+    return self.evernote_token ~= nil or self.html_export ~= false or self.txt_export ~= false
+end
+
+function EvernoteExporter:migrateClippings()
+    local old_dir = util.joinPath(util.realpath(util.joinPath(self.path, "..")),
+        "evernote.sdr")
+    if lfs.attributes(old_dir, "mode") == "directory" then
+        local mv_bin = Device:isAndroid() and "/system/bin/mv" or "/bin/mv"
+        return util.execute(mv_bin, old_dir, self.clipping_dir) == 0
+    end
 end
 
 function EvernoteExporter:addToMainMenu(tab_item_table)
@@ -48,7 +74,7 @@ function EvernoteExporter:addToMainMenu(tab_item_table)
         sub_item_table = {
             {
                 text_func = function()
-                    local domain = nil
+                    local domain
                     if self.evernote_domain == "sandbox" then
                         domain = "Sandbox"
                     elseif self.evernote_domain == "yinxiang" then
@@ -85,7 +111,7 @@ function EvernoteExporter:addToMainMenu(tab_item_table)
             {
                 text = _("Export all notes in this book"),
                 enabled_func = function()
-                    return self.evernote_token ~= nil or self.html_export ~= false
+                    return not self:isDocless() and self:readyToExport()
                 end,
                 callback = function()
                     UIManager:scheduleIn(0.5, function()
@@ -93,7 +119,7 @@ function EvernoteExporter:addToMainMenu(tab_item_table)
                     end)
 
                     UIManager:show(InfoMessage:new{
-                        text = _("Exporting may take several seconds..."),
+                        text = _("Exporting may take several seconds…"),
                         timeout = 1,
                     })
                 end
@@ -101,7 +127,7 @@ function EvernoteExporter:addToMainMenu(tab_item_table)
             {
                 text = _("Export all notes in your library"),
                 enabled_func = function()
-                    return self.evernote_token ~= nil or self.html_export ~= false
+                    return self:readyToExport()
                 end,
                 callback = function()
                     UIManager:scheduleIn(0.5, function()
@@ -109,7 +135,7 @@ function EvernoteExporter:addToMainMenu(tab_item_table)
                     end)
 
                     UIManager:show(InfoMessage:new{
-                        text = _("Exporting may take several minutes..."),
+                        text = _("Exporting may take several minutes…"),
                         timeout = 1,
                     })
                 end
@@ -119,13 +145,36 @@ function EvernoteExporter:addToMainMenu(tab_item_table)
                 checked_func = function() return self.html_export end,
                 callback = function()
                     self.html_export = not self.html_export
+                    if self.html_export then self.txt_export = false end
+                    self:saveSettings()
                 end
             },
+            {
+                text = _("Export to local clipping text file"),
+                checked_func = function() return self.txt_export end,
+                callback = function()
+                    self.txt_export = not self.txt_export
+                    if self.txt_export then self.html_export = false end
+                    self:saveSettings()
+                end
+            },
+            {
+                text = _("Purge history records"),
+                callback = function()
+                    self.config:purge()
+                    UIManager:show(InfoMessage:new{
+                        text = _("History records have been purged.\nAll notes will be exported again next time.\nIt is recommended to remove the existing KOReaderClipping.txt file to avoid duplication."),
+                    })
+                end
+            }
         }
     })
 end
 
 function EvernoteExporter:login()
+    if not NetworkMgr:isOnline() then
+        NetworkMgr:promptWifiOn()
+    end
     self.login_dialog = LoginDialog:new{
         title = self.login_title,
         username = self.evernote_username or "",
@@ -149,7 +198,7 @@ function EvernoteExporter:login()
                         end)
 
                         UIManager:show(InfoMessage:new{
-                            text = _("Logging in please wait..."),
+                            text = _("Logging in. Please wait…"),
                             timeout = 1,
                         })
                     end,
@@ -185,12 +234,9 @@ function EvernoteExporter:doLogin(username, password)
     self.evernote_username = username
     local ok, token = pcall(oauth.getToken, oauth)
     -- prompt users to turn on Wifi if network is unreachable
-    if not ok and token and token:find("Network is unreachable") then
-        NetworkMgr:promptWifiOn()
-        return
-    elseif not ok and token then
+    if not ok and token then
         UIManager:show(InfoMessage:new{
-            text = _("Error occurs when login:") .. "\n" .. token,
+            text = _("An error occurred while logging in:") .. "\n" .. token,
         })
         return
     end
@@ -199,39 +245,41 @@ function EvernoteExporter:doLogin(username, password)
         domain = self.evernote_domain,
         authToken = token,
     }
-    local ok, guid = pcall(self.getExportNotebook, self, client)
+    local guid
+    ok, guid = pcall(self.getExportNotebook, self, client)
     if not ok and guid and guid:find("Transport not open") then
         NetworkMgr:promptWifiOn()
         return
     elseif not ok and guid then
         UIManager:show(InfoMessage:new{
-            text = _("Error occurs when login:") .. "\n" .. guid,
+            text = _("An error occurred while logging in:") .. "\n" .. guid,
         })
     elseif ok and guid then
         self.evernote_token = token
         self.notebook_guid = guid
         UIManager:show(InfoMessage:new{
-            text = _("Login to Evernote successfully"),
+            text = _("Logged in to Evernote."),
         })
     end
 
-    self:onSaveSettings()
+    self:saveSettings()
 end
 
 function EvernoteExporter:logout()
     self.evernote_token = nil
     self.notebook_guid = nil
     self.evernote_domain = nil
-    self:onSaveSettings()
+    self:saveSettings()
 end
 
-function EvernoteExporter:onSaveSettings()
+function EvernoteExporter:saveSettings()
     local settings = {
         domain = self.evernote_domain,
         username = self.evernote_username,
         token = self.evernote_token,
         notebook = self.notebook_guid,
         html_export = self.html_export,
+        txt_export = self.txt_export,
     }
     G_reader_settings:saveSetting("evernote", settings)
 end
@@ -297,13 +345,19 @@ end
 
 function EvernoteExporter:exportClippings(clippings)
     local client = nil
-    local exported_stamp = "html"
-    if not self.html_export then
+    local exported_stamp
+    if not self.html_export and not self.txt_export then
         client = require("EvernoteClient"):new{
             domain = self.evernote_domain,
             authToken = self.evernote_token,
         }
         exported_stamp = self.notebook_guid
+    elseif self.html_export then
+        exported_stamp= "html"
+    elseif self.txt_export then
+        exported_stamp = "txt"
+    else
+        assert("an exported_stamp is expected for a new export type")
     end
 
     local export_count, error_count = 0, 0
@@ -317,11 +371,11 @@ function EvernoteExporter:exportClippings(clippings)
         if booknotes.exported[exported_stamp] ~= true then
             local ok, err
             if self.html_export then
-                ok, err = pcall(self.exportBooknotesToHTML, self,
-                        title, booknotes)
+                ok, err = pcall(self.exportBooknotesToHTML, self, title, booknotes)
+            elseif self.txt_export then
+                ok, err = pcall(self.exportBooknotesToTXT, self, title, booknotes)
             else
-                ok, err = pcall(self.exportBooknotesToEvernote, self,
-                        client, title, booknotes)
+                ok, err = pcall(self.exportBooknotesToEvernote, self, client, title, booknotes)
             end
             -- error reporting
             if not ok and err and err:find("Transport not open") then
@@ -340,22 +394,31 @@ function EvernoteExporter:exportClippings(clippings)
         end
     end
 
-    local msg = "Not exported anything."
+    local msg = "Nothing was exported."
     local all_count = export_count + error_count
     if export_count > 0 and error_count == 0 then
         if all_count == 1 then
-            msg = _("Exported notes in book:") .. "\n" .. export_title
+            msg = _("Exported notes from book:") .. "\n" .. export_title
         else
-            msg = _("Exported notes in book:") .. "\n" .. export_title
-            msg = msg .. "\n" .. _("and ") .. all_count-1 .. _(" others.")
+            msg = T(
+                _("Exported notes from book:\n%1\nand %2 others."),
+                export_title,
+                all_count-1
+            )
         end
     elseif error_count > 0 then
         if all_count == 1 then
-            msg = _("Error occurs when exporting book:") .. "\n" .. error_title
+            msg = _("An error occurred while trying to export notes from book:") .. "\n" .. error_title
         else
-            msg = _("Errors occur when exporting book:") .. "\n" .. error_title
-            msg = msg .. "\n" .. _("and ") .. error_count-1 .. (" others.")
+            msg = T(
+                _("Multiple errors occurred while trying to export notes from book:\n%1\nand %2 others."),
+                error_title,
+                error_count-1
+            )
         end
+    end
+    if self.html_export or self.txt_export then
+        msg = msg .. T(_("\nNotes can be found in %1/."), realpath(self.clipping_dir))
     end
     UIManager:show(InfoMessage:new{ text = msg })
 end
@@ -399,5 +462,30 @@ function EvernoteExporter:exportBooknotesToHTML(title, booknotes)
     end
 end
 
-return EvernoteExporter
+function EvernoteExporter:exportBooknotesToTXT(title, booknotes)
+    local file = io.open(self.clipping_dir .. "/KOReaderClipping.txt", "a")
+    if file then
+        file:write(title .. "\n")
+        for _ignore1, chapter in ipairs(booknotes) do
+            if chapter.title then
+                file:write(" - " .. chapter.title .. "\n\n")
+            end
+            for _ignore2, clipping in ipairs(chapter) do
+                file:write(T(_("   -- Page: %1, added on %2\n\n"),
+                             clipping.page, os.date("%c", clipping.time)))
+                if clipping.text then
+                    file:write(clipping.text)
+                end
+                if clipping.image then
+                    file:write(_("<An image>"))
+                end
+                file:write("\n==========\n")
+            end
+        end
 
+        file:write("\n")
+        file:close()
+    end
+end
+
+return EvernoteExporter

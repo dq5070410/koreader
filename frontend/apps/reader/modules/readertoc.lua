@@ -9,7 +9,6 @@ local Screen = require("device").screen
 local Device = require("device")
 local Event = require("ui/event")
 local Font = require("ui/font")
-local DEBUG = require("dbg")
 local _ = require("gettext")
 
 local ReaderToc = InputContainer:new{
@@ -61,6 +60,7 @@ function ReaderToc:resetToc()
     self.toc = nil
     self.ticks = {}
     self.collapsed_toc = {}
+    self.expanded_nodes = {}
 end
 
 function ReaderToc:onUpdateToc()
@@ -77,25 +77,36 @@ function ReaderToc:fillToc()
     self.toc = self.ui.document:getToc()
 end
 
-function ReaderToc:getTocTitleByPage(pn_or_xp)
+function ReaderToc:getTocIndexByPage(pn_or_xp)
     self:fillToc()
-    if #self.toc == 0 then return "" end
+    if #self.toc == 0 then return end
     local pageno = pn_or_xp
     if type(pn_or_xp) == "string" then
         pageno = self.ui.document:getPageFromXPointer(pn_or_xp)
     end
-    local pre_entry = self.toc[1]
+    local pre_index = 1
     for _k,_v in ipairs(self.toc) do
         if _v.page > pageno then
             break
         end
-        pre_entry = _v
+        pre_index = _k
     end
-    return self:cleanUpTocTitle(pre_entry.title)
+    return pre_index
+end
+
+function ReaderToc:getTocTitleByPage(pn_or_xp)
+    local index = self:getTocIndexByPage(pn_or_xp)
+    if index then
+        return self:cleanUpTocTitle(self.toc[index].title)
+    else
+        return ""
+    end
 end
 
 function ReaderToc:getTocTitleOfCurrentPage()
-    return self:getTocTitleByPage(self.pageno)
+    if self.pageno then
+        return self:getTocTitleByPage(self.pageno)
+    end
 end
 
 function ReaderToc:getMaxDepth()
@@ -132,7 +143,7 @@ function ReaderToc:getTocTicks(level)
                 depth = v.depth
             end
         else
-            local depth = nil
+            local depth
             if level > 0 then
                 depth = level
             else
@@ -220,19 +231,36 @@ function ReaderToc:getChapterPagesDone(pageno, level)
 end
 
 function ReaderToc:updateCurrentNode()
-    if #self.collapsed_toc > 0 then
+    if #self.collapsed_toc > 0 and self.pageno then
         for i, v in ipairs(self.collapsed_toc) do
             if v.page > self.pageno then
                 self.collapsed_toc.current = i > 1 and i - 1 or 1
-                break
+                return
             end
+        end
+        self.collapsed_toc.current = #self.collapsed_toc
+    end
+end
+
+function ReaderToc:expandParentNode(index)
+    if index then
+        local nodes_to_expand = {}
+        local depth = self.toc[index].depth
+        for i = index - 1, 1, -1 do
+            if depth > self.toc[i].depth then
+                depth = self.toc[i].depth
+                table.insert(nodes_to_expand, i)
+            end
+            if depth == 1 then break end
+        end
+        for i = #nodes_to_expand, 1, -1 do
+            self:expandToc(nodes_to_expand[i])
         end
     end
 end
 
 function ReaderToc:onShowToc()
     self:fillToc()
-    local max_depth = self:getMaxDepth()
     -- build menu items
     if #self.toc > 0 and not self.toc[1].text then
         for _,v in ipairs(self.toc) do
@@ -244,14 +272,14 @@ function ReaderToc:onShowToc()
     -- update collapsible state
     self.expand_button = Button:new{
         icon = "resources/icons/appbar.control.expand.png",
-        width = Screen:scaleByDPI(30),
+        width = Screen:scaleBySize(30),
         bordersize = 0,
         show_parent = self,
     }
 
     self.collapse_button = Button:new{
         icon = "resources/icons/appbar.control.collapse.png",
-        width = Screen:scaleByDPI(30),
+        width = Screen:scaleBySize(30),
         bordersize = 0,
         show_parent = self,
     }
@@ -274,8 +302,6 @@ function ReaderToc:onShowToc()
         end
     end
 
-    self:updateCurrentNode()
-
     local button_size = self.expand_button:getSize()
     local toc_menu = Menu:new{
         title = _("Table of Contents"),
@@ -283,6 +309,7 @@ function ReaderToc:onShowToc()
         state_size = button_size,
         ui = self.ui,
         is_borderless = true,
+        is_popout = false,
         width = Screen:getWidth(),
         height = Screen:getHeight(),
         cface = Font:getFace("cfont", 20),
@@ -307,7 +334,7 @@ function ReaderToc:onShowToc()
     function toc_menu:onMenuSelect(item, pos)
         -- if toc item has expand/collapse state and tap select on the left side
         -- the state switch action is triggered, otherwise goto the linked page
-        if item.state and pos.x < 0.3 then
+        if item.state and pos and pos.x < 0.3 then
             item.state.callback()
         else
             toc_menu:close_callback()
@@ -323,6 +350,12 @@ function ReaderToc:onShowToc()
 
     self.toc_menu = toc_menu
 
+    self:updateCurrentNode()
+    -- auto expand the parent node of current page
+    self:expandParentNode(self:getTocIndexByPage(self.pageno))
+    -- auto goto page of the current toc entry
+    self.toc_menu:switchItemTable(nil, self.collapsed_toc, self.collapsed_toc.current or -1)
+
     UIManager:show(menu_container)
 
     return true
@@ -330,6 +363,9 @@ end
 
 -- expand TOC node of index in raw toc table
 function ReaderToc:expandToc(index)
+    for k, v in ipairs(self.expanded_nodes) do
+        if v == index then return end
+    end
     table.insert(self.expanded_nodes, index)
     local cur_node = self.toc[index]
     local cur_depth = cur_node.depth
@@ -341,6 +377,9 @@ function ReaderToc:expandToc(index)
             break
         end
     end
+    -- either the toc entry of index has no child nodes
+    -- or it's parent nodes are not expanded yet
+    if not collapsed_index then return end
     for i = index + 1, #self.toc do
         local v = self.toc[i]
         if v.depth == cur_depth + 1 then
@@ -356,11 +395,17 @@ function ReaderToc:expandToc(index)
         indent = self.toc_indent:rep(cur_depth-1),
     }
     self:updateCurrentNode()
-    self.toc_menu:swithItemTable(nil, self.collapsed_toc, -1)
+    self.toc_menu:switchItemTable(nil, self.collapsed_toc, -1)
 end
 
 -- collapse TOC node of index in raw toc table
 function ReaderToc:collapseToc(index)
+    for k, v in ipairs(self.expanded_nodes) do
+        if v == index then
+            table.remove(self.expanded_nodes, k)
+            break
+        end
+    end
     local cur_node = self.toc[index]
     local cur_depth = cur_node.depth
     local i = 1
@@ -386,7 +431,7 @@ function ReaderToc:collapseToc(index)
         indent = self.toc_indent:rep(cur_depth-1),
     }
     self:updateCurrentNode()
-    self.toc_menu:swithItemTable(nil, self.collapsed_toc, -1)
+    self.toc_menu:switchItemTable(nil, self.collapsed_toc, -1)
 end
 
 function ReaderToc:addToMainMenu(tab_item_table)

@@ -41,7 +41,10 @@ if [ "${INIT_TYPE}" == "upstart" ] ; then
 fi
 
 # Keep track of what we do with pillow...
-PILLOW_DISABLED="no"
+export AWESOME_STOPPED="no"
+PILLOW_HARD_DISABLED="no"
+PILLOW_SOFT_DISABLED="no"
+PASSCODE_DISABLED="no"
 
 # Keep track of if we were started through KUAL
 FROM_KUAL="no"
@@ -109,18 +112,27 @@ if [ -f "${NEWUPDATE}" ] ; then
 	fi
 fi
 
+# load our own shared libraries if possible
+export LD_LIBRARY_PATH=${KOREADER_DIR}/libs:$LD_LIBRARY_PATH
+
 # export trained OCR data directory
 export TESSDATA_PREFIX="data"
 
 # export dict directory
 export STARDICT_DATA_DIR="data/dict"
 
-logmsg "Setting up IPTables rules . . ."
-# accept input ports for zsync plugin
-iptables -A INPUT -i wlan0 -p udp --dport 5670 -j ACCEPT
-iptables -A INPUT -i wlan0 -p tcp --dport 49152:49162 -j ACCEPT
-# accept input ports for calibre companion
-iptables -A INPUT -i wlan0 -p udp --dport 8134 -j ACCEPT
+# export external font directory
+export EXT_FONT_DIR="/mnt/us/fonts"
+
+# Only setup IPTables on evices where it makes sense to (FW 5.x & K4)
+if [ "${INIT_TYPE}" == "upstart" -o "$(uname -r)" == "2.6.31-rt11-lab126" ] ; then
+	logmsg "Setting up IPTables rules . . ."
+	# accept input ports for zsync plugin
+	iptables -A INPUT -i wlan0 -p udp --dport 5670 -j ACCEPT
+	iptables -A INPUT -i wlan0 -p tcp --dport 49152:49162 -j ACCEPT
+	# accept input ports for calibre companion
+	iptables -A INPUT -i wlan0 -p udp --dport 8134 -j ACCEPT
+fi
 
 # bind-mount system fonts
 if ! grep ${KOREADER_DIR}/fonts/host /proc/mounts > /dev/null 2>&1 ; then
@@ -137,6 +149,15 @@ if [ -d /mnt/us/fonts ] ; then
 	fi
 fi
 
+# bind-mount csp fonts
+if [ -d /var/local/font/mnt ] ; then
+	mkdir -p ${KOREADER_DIR}/fonts/cspfonts
+	if ! grep ${KOREADER_DIR}/fonts/cspfonts /proc/mounts > /dev/null 2>&1 ; then
+		logmsg "Mounting cspfonts . . ."
+		mount -o bind /var/local/font/mnt ${KOREADER_DIR}/fonts/cspfonts
+	fi
+fi
+
 # bind-mount linkfonts
 if [ -d /mnt/us/linkfonts/fonts ] ; then
 	mkdir -p ${KOREADER_DIR}/fonts/linkfonts
@@ -144,6 +165,14 @@ if [ -d /mnt/us/linkfonts/fonts ] ; then
 		logmsg "Mounting linkfonts . . ."
 		mount -o bind /mnt/us/linkfonts/fonts ${KOREADER_DIR}/fonts/linkfonts
 	fi
+fi
+
+# check if we need to disable the system passcode, because it messes with us in fun and interesting (and, more to the point, intractable) ways...
+# NOTE: The most egregious one being that it inhibits the outOfScreenSaver event on wakeup until the passcode is validated, which we can't do, since we capture all input...
+if [ -f "/var/local/system/userpasswdenabled" ] ; then
+	logmsg "Disabling system passcode . . ."
+	rm -f "/var/local/system/userpasswdenabled"
+	PASSCODE_DISABLED="yes"
 fi
 
 # check if we are supposed to shut down the Amazon framework
@@ -168,13 +197,28 @@ fi
 if [ "${STOP_FRAMEWORK}" == "no" -a "${INIT_TYPE}" == "upstart" ] ; then
 	count=$(lipc-get-prop -eiq com.github.koreader.kpvbooklet.timer count)
 	if [ "$count" == "" -o "$count" == "0" ] ; then
-		#logmsg "Disabling pillow . . ."
-		#lipc-set-prop com.lab126.pillow disableEnablePillow disable
-		logmsg "Hiding the status bar . . ."
-		# NOTE: One more great find from eureka (http://www.mobileread.com/forums/showpost.php?p=2454141&postcount=34)
-		lipc-set-prop com.lab126.pillow interrogatePillow '{"pillowId": "default_status_bar", "function": "nativeBridge.hideMe();"}'
-		PILLOW_DISABLED="yes"
-		if [ "${NO_SLEEP}" == "no" ] ; then
+		# NOTE: Dump the fb so we can restore something useful on exit...
+		cat /dev/fb0 > /var/tmp/koreader-fb.dump
+		# NOTE: We want to disable the status bar (at the very least). Unfortunately, the soft hide/unhide method doesn't work properly anymore since FW 5.6.5...
+		if [ "$(printf "%.3s" $(grep '^Kindle 5' /etc/prettyversion.txt 2>&1 | sed -n -r 's/^(Kindle)([[:blank:]]*)([[:digit:].]*)(.*?)$/\3/p' | tr -d '.'))" -ge "565" ] ; then
+			PILLOW_HARD_DISABLED="yes"
+			# FIXME: So we resort to killing pillow completely on FW >= 5.6.5...
+			logmsg "Disabling pillow . . ."
+			lipc-set-prop com.lab126.pillow disableEnablePillow disable
+			# NOTE: And, oh, joy, on FW >= 5.7.2, this is not enough to prevent the clock from refreshing, so, take the bull by the horns, and SIGSTOP the WM while we run...
+			if [ "$(printf "%.3s" $(grep '^Kindle 5' /etc/prettyversion.txt 2>&1 | sed -n -r 's/^(Kindle)([[:blank:]]*)([[:digit:].]*)(.*?)$/\3/p' | tr -d '.'))" -ge "572" ] ; then
+				logmsg "Stopping awesome . . ."
+				killall -stop awesome
+				AWESOME_STOPPED="yes"
+			fi
+		else
+			logmsg "Hiding the status bar . . ."
+			# NOTE: One more great find from eureka (http://www.mobileread.com/forums/showpost.php?p=2454141&postcount=34)
+			lipc-set-prop com.lab126.pillow interrogatePillow '{"pillowId": "default_status_bar", "function": "nativeBridge.hideMe();"}'
+			PILLOW_SOFT_DISABLED="yes"
+		fi
+		# NOTE: We don't need to sleep at all if we've already SIGSTOPped awesome ;)
+		if [ "${NO_SLEEP}" == "no" -a "${AWESOME_STOPPED}" == "no" ] ; then
 			# NOTE: Leave the framework time to refresh the screen, so we don't start before it has finished redrawing after collapsing the title bar
 			usleep 250000
 			# NOTE: If we were started from KUAL, we risk getting a list item to popup right over us, so, wait some more...
@@ -199,7 +243,11 @@ logmsg "Starting KOReader . . ."
 if [ "${FROM_KUAL}" == "yes" ] ; then
 	eips_print_bottom_centered "Starting KOReader . . ." 1
 fi
-./reader.lua "$@" 2> crash.log
+
+# we keep maximum 500K worth of crash log
+cat crash.log 2> /dev/null | tail -c 500000 > crash.log.new
+mv -f crash.log.new crash.log
+./reader.lua "$@" >> crash.log 2>&1
 
 # clean up our own process tree in case the reader crashed (if needed, to avoid flooding KUAL's log)
 if pidof reader.lua > /dev/null 2>&1 ; then
@@ -219,6 +267,12 @@ if grep ${KOREADER_DIR}/fonts/altfonts /proc/mounts > /dev/null 2>&1 ; then
 	umount ${KOREADER_DIR}/fonts/altfonts
 fi
 
+# unmount cspfonts
+if grep ${KOREADER_DIR}/fonts/cspfonts /proc/mounts > /dev/null 2>&1 ; then
+	logmsg "Unmounting cspfonts . . ."
+	umount ${KOREADER_DIR}/fonts/cspfonts
+fi
+
 # unmount linkfonts
 if grep ${KOREADER_DIR}/fonts/linkfonts /proc/mounts > /dev/null 2>&1 ; then
 	logmsg "Unmounting linkfonts . . ."
@@ -229,34 +283,58 @@ fi
 if [ "${STOP_FRAMEWORK}" == "no" -a "${INIT_TYPE}" == "sysv" ] ; then
 	logmsg "Resuming cvm . . ."
 	killall -cont cvm
+	# We need to handle the screen refresh ourselves, frontend/device/kindle/device.lua's Kindle3.exit is called before we resume cvm ;).
+	echo 'send 139' > /proc/keypad
+	echo 'send 139' > /proc/keypad
 fi
 
 # Restart framework (if need be)
 if [ "${STOP_FRAMEWORK}" == "yes" ] ; then
 	logmsg "Restarting framework . . ."
 	if [ "${INIT_TYPE}" == "sysv" ] ; then
-		/etc/init.d/framework start
+		cd / && env -u LD_LIBRARY_PATH /etc/init.d/framework start
 	else
-		start lab126_gui
+		cd / && env -u LD_LIBRARY_PATH start lab126_gui
 	fi
 fi
 
-# display chrome bar (upstart & framework up only)
+# Display chrome bar if need be (upstart & framework up only)
 if [ "${STOP_FRAMEWORK}" == "no" -a "${INIT_TYPE}" == "upstart" ] ; then
-	# Only if we actually killed it...
-	if [ "${PILLOW_DISABLED}" == "yes" ] ; then
-		#logmsg "Enabling pillow . . ."
-		#lipc-set-prop com.lab126.pillow disableEnablePillow enable
+	# Depending on the FW version, we may have handled things in a few different manners...
+	if [ "${AWESOME_STOPPED}" == "yes" ] ; then
+		logmsg "Resuming awesome . . ."
+		killall -cont awesome
+	fi
+	if [ "${PILLOW_HARD_DISABLED}" == "yes" ] ; then
+		logmsg "Enabling pillow . . ."
+		lipc-set-prop com.lab126.pillow disableEnablePillow enable
+		# NOTE: Try to leave the user with a slightly more useful FB content than our own last screen...
+		cat /var/tmp/koreader-fb.dump > /dev/fb0
+		rm -f /var/tmp/koreader-fb.dump
+		lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home
+		# NOTE: In case we ever need an extra full flash refresh...
+		#eips -s w=${SCREEN_X_RES},h=${SCREEN_Y_RES} -f
+	fi
+	if [ "${PILLOW_SOFT_DISABLED}" == "yes" ] ; then
 		logmsg "Restoring the status bar . . ."
+		# NOTE: Try to leave the user with a slightly more useful FB content than our own last screen...
+		cat /var/tmp/koreader-fb.dump > /dev/fb0
+		rm -f /var/tmp/koreader-fb.dump
 		lipc-set-prop com.lab126.pillow interrogatePillow '{"pillowId": "default_status_bar", "function": "nativeBridge.showMe();"}'
-		# Poke the search bar too, so that we get a proper refresh ;)
-		lipc-set-prop com.lab126.pillow interrogatePillow '{"pillowId": "search_bar", "function": "nativeBridge.hideMe(); nativeBridge.showMe();"}'
+		lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home
 	fi
 fi
 
-logmsg "Restoring IPTables rules . . ."
-# restore firewall rules
-iptables -D INPUT -i wlan0 -p udp --dport 8134 -j ACCEPT
-iptables -D INPUT -i wlan0 -p udp --dport 5670 -j ACCEPT
-iptables -D INPUT -i wlan0 -p tcp --dport 49152:49162 -j ACCEPT
+if [ "${INIT_TYPE}" == "upstart" -o "$(uname -r)" == "2.6.31-rt11-lab126" ] ; then
+	logmsg "Restoring IPTables rules . . ."
+	# restore firewall rules
+	iptables -D INPUT -i wlan0 -p udp --dport 8134 -j ACCEPT
+	iptables -D INPUT -i wlan0 -p udp --dport 5670 -j ACCEPT
+	iptables -D INPUT -i wlan0 -p tcp --dport 49152:49162 -j ACCEPT
+fi
+
+if [ "${PASSCODE_DISABLED}" == "yes" ] ; then
+	logmsg "Restoring system passcode . . ."
+	touch "/var/local/system/userpasswdenabled"
+fi
 

@@ -1,8 +1,8 @@
 local DocumentRegistry = require("document/documentregistry")
 local DocSettings = require("docsettings")
-local DEBUG = require("dbg")
-require("MD5")
--- lfs
+local ReadHistory = require("readhistory")
+local md5 = require("ffi/MD5")
+local util = require("util")
 
 local MyClipping = {
     my_clippings = "/mnt/us/documents/My Clippings.txt",
@@ -10,7 +10,7 @@ local MyClipping = {
 }
 
 function MyClipping:new(o)
-    o = o or {}
+    if o == nil then o = {} end
     setmetatable(o, self)
     self.__index = self
     return o
@@ -48,7 +48,6 @@ function MyClipping:parseMyClippings()
     local clippings = {}
     if file then
         local index = 1
-        local corrupted = false
         local title, author, info, text
         for line in file:lines() do
             line = line:match("^%s*(.-)%s*$") or ""
@@ -60,7 +59,7 @@ function MyClipping:parseMyClippings()
                 }
             elseif index == 2 then
                 info = self:getInfo(line)
-            elseif index == 3 then
+            -- elseif index == 3 then
             -- should be a blank line, we skip this line
             elseif index == 4 then
                 text = self:getText(line)
@@ -98,7 +97,7 @@ local extensions = {
     [".doc"] = true,
 }
 
--- remove file extensions added by former Koreader
+-- remove file extensions added by former KOReader
 -- extract author name in "Title(Author)" format
 -- extract author name in "Title - Author" format
 function MyClipping:getTitle(line)
@@ -171,8 +170,10 @@ function MyClipping:getTime(line)
     local _, _, hour, minute, second = line:find("(%d+):(%d+):(%d+)")
     if year and month and day and hour and minute and second then
         for k, v in pairs(pms) do
-            if line:find(k) then hour = hour + v end
-            break
+            if line:find(k) then
+                hour = hour + v
+                break
+            end
         end
         local time = os.time({
             year = year, month = month, day = day,
@@ -220,7 +221,7 @@ function MyClipping:getImage(image)
         --doc:clipPagePNGFile(image.pos0, image.pos1,
                 --image.pboxes, image.drawer, "/tmp/"..md5(png)..".png")
         doc:close()
-        if png then return { png = png, hash = md5(png) } end
+        if png then return { png = png, hash = md5.sum(png) } end
     end
 end
 
@@ -255,25 +256,37 @@ function MyClipping:parseHighlight(highlights, book)
     table.sort(book, function(v1, v2) return v1[1].page < v2[1].page end)
 end
 
+function MyClipping:parseHistoryFile(clippings, history_file, doc_file)
+    if lfs.attributes(history_file, "mode") ~= "file"
+    or not history_file:find(".+%.lua$") then
+        return
+    end
+    if lfs.attributes(doc_file, "mode") ~= "file" then return end
+    local ok, stored = pcall(dofile, history_file)
+    if ok and stored.highlight then
+        local _, docname = util.splitFilePathName(doc_file)
+        local title, author = self:getTitle(util.splitFileNameSuffix(docname))
+        clippings[title] = {
+            file = doc_file,
+            title = title,
+            author = author,
+        }
+        self:parseHighlight(stored.highlight, clippings[title])
+    end
+end
+
 function MyClipping:parseHistory()
     local clippings = {}
     for f in lfs.dir(self.history_dir) do
-        local path = self.history_dir.."/"..f
-        if lfs.attributes(path, "mode") == "file" and path:find(".+%.lua$") then
-            local ok, stored = pcall(dofile, path)
-            if ok and stored.highlight then
-                local _, _, docname = path:find("%[.*%](.*)%.lua$")
-                local title, author = self:getTitle(docname)
-                local path = DocSettings:getPathFromHistory(f)
-                local name = DocSettings:getNameFromHistory(f)
-                clippings[title] = {
-                    file = path .. "/" .. name,
-                    title = title,
-                    author = author,
-                }
-                self:parseHighlight(stored.highlight, clippings[title])
-            end
-        end
+        self:parseHistoryFile(clippings,
+                              self.history_dir .. "/" .. f,
+                              DocSettings:getPathFromHistory(f) .. "/" ..
+                              DocSettings:getNameFromHistory(f))
+    end
+    for _, item in ipairs(ReadHistory.hist) do
+        self:parseHistoryFile(clippings,
+                              DocSettings:getSidecarFile(item.file),
+                              item.file)
     end
 
     return clippings

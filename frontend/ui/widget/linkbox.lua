@@ -8,7 +8,7 @@ local Blitbuffer = require("ffi/blitbuffer")
 
 local LinkBox = InputContainer:new{
     box = nil,
-    color = Blitbuffer.gray(0.5),
+    color = Blitbuffer.COLOR_GREY,
     radius = 0,
     bordersize = 2,
 }
@@ -33,7 +33,17 @@ function LinkBox:paintTo(bb)
             self.bordersize, self.color, self.radius)
 end
 
+function LinkBox:onCloseWidget()
+    UIManager:setDirty(nil, function()
+        return "partial", self.box
+    end)
+    return true
+end
+
 function LinkBox:onShow()
+    UIManager:setDirty(self, function()
+        return "ui", self.box
+    end)
     if self.timeout then
         UIManager:scheduleIn(self.timeout, function()
             UIManager:close(self)

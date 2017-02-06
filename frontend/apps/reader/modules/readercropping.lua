@@ -12,7 +12,6 @@ local BBoxWidget = require("ui/widget/bboxwidget")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local Button = require("ui/widget/button")
 local Math = require("optmath")
-local DEBUG = require("dbg")
 local Blitbuffer = require("ffi/blitbuffer")
 
 local PageCropDialog = VerticalGroup:new{
@@ -20,7 +19,7 @@ local PageCropDialog = VerticalGroup:new{
     cancel_text = "Cancel",
     ok_callback = function() end,
     cancel_callback = function() end,
-    button_width = math.floor(Screen:scaleByDPI(70)),
+    button_width = math.floor(Screen:scaleBySize(70)),
 }
 
 function PageCropDialog:init()
@@ -64,6 +63,21 @@ function PageCropDialog:init()
     }
 end
 
+function PageCropDialog:onCloseWidget()
+    UIManager:setDirty(nil, function()
+        return "partial", self[1].dimen:combine(self[2].dimen)
+    end)
+    return true
+end
+
+function PageCropDialog:onShow()
+    UIManager:setDirty(self, function()
+        return "ui", self[1].dimen:combine(self[2].dimen)
+    end)
+    return true
+end
+
+
 local ReaderCropping = InputContainer:new{}
 
 function ReaderCropping:onPageCrop(mode)
@@ -71,14 +85,16 @@ function ReaderCropping:onPageCrop(mode)
     -- backup original zoom mode as cropping use "page" zoom mode
     self.orig_zoom_mode = self.view.zoom_mode
     if mode == "auto" then
-        self:setCropZoomMode(true)
+        if self.document.configurable.text_wrap ~= 1 then
+            self:setCropZoomMode(true)
+        end
         return
     end
     -- backup original view dimen
     self.orig_view_dimen = Geom:new{w = self.view.dimen.w, h = self.view.dimen.h}
     -- backup original view bgcolor
     self.orig_view_bgcolor = self.view.outer_page_color
-    self.view.outer_page_color = Blitbuffer.gray(0.5) -- gray bgcolor
+    self.view.outer_page_color = Blitbuffer.COLOR_GREY
     -- backup original page scroll
     self.orig_page_scroll = self.view.page_scroll
     self.view.page_scroll = false
@@ -148,18 +164,23 @@ function ReaderCropping:exitPageCrop(confirmed)
     else
         self:setCropZoomMode(confirmed)
     end
-    UIManager.repaint_all = true
 end
 
 function ReaderCropping:setCropZoomMode(confirmed)
     if confirmed then
         -- if original zoom mode is not "content", set zoom mode to "contentwidth"
-        self.ui:handleEvent(Event:new("SetZoomMode",
-            self.orig_zoom_mode:find("content") and self.orig_zoom_mode or "contentwidth"))
+        self:setZoomMode(
+            self.orig_zoom_mode:find("content")
+            and self.orig_zoom_mode
+            or "contentwidth")
         self.ui:handleEvent(Event:new("InitScrollPageStates"))
     else
-        self.ui:handleEvent(Event:new("SetZoomMode", self.orig_zoom_mode))
+        self:setZoomMode(self.orig_zoom_mode)
     end
+end
+
+function ReaderCropping:setZoomMode(mode)
+    self.ui:handleEvent(Event:new("SetZoomMode", mode))
 end
 
 function ReaderCropping:onReadSettings(config)

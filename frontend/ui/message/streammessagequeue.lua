@@ -1,10 +1,8 @@
 local ffi = require("ffi")
-local DEBUG = require("dbg")
-local util = require("ffi/util")
-local Event = require("ui/event")
+local logger = require("logger")
 local MessageQueue = require("ui/message/messagequeue")
 
-local dummy = require("ffi/zeromq_h")
+local _ = require("ffi/zeromq_h")
 local zmq = ffi.load("libs/libzmq.so.4")
 local czmq = ffi.load("libs/libczmq.so.1")
 
@@ -18,16 +16,17 @@ function StreamMessageQueue:start()
     self.socket = czmq.zsocket_new(self.context, ffi.C.ZMQ_STREAM)
     self.poller = czmq.zpoller_new(self.socket, nil)
     local endpoint = string.format("tcp://%s:%d", self.host, self.port)
-    DEBUG("connect to endpoint", endpoint)
+    logger.warn("connect to endpoint", endpoint)
     local rc = czmq.zsocket_connect(self.socket, endpoint)
     if rc ~= 0 then
         error("cannot connect to " .. endpoint)
     end
     local id_size = ffi.new("size_t[1]", 256)
     local buffer = ffi.new("uint8_t[?]", id_size[0])
-    local rc = zmq.zmq_getsockopt(self.socket, ffi.C.ZMQ_IDENTITY, buffer, id_size)
+    -- @todo: check return of zmq_getsockopt
+    zmq.zmq_getsockopt(self.socket, ffi.C.ZMQ_IDENTITY, buffer, id_size)
     self.id = ffi.string(buffer, id_size[0])
-    DEBUG("id", #self.id, self.id)
+    logger.dbg("id", #self.id, self.id)
 end
 
 function StreamMessageQueue:stop()
@@ -66,7 +65,7 @@ function StreamMessageQueue:waitEvent()
     while czmq.zpoller_wait(self.poller, 0) ~= nil and wait_packages > 0 do
         local id_frame = czmq.zframe_recv(self.socket)
         if id_frame ~= nil then
-            local id = self:handleZframe(id_frame)
+            self:handleZframe(id_frame)
         end
         local frame = czmq.zframe_recv(self.socket)
         if frame ~= nil then
@@ -80,7 +79,6 @@ function StreamMessageQueue:waitEvent()
 end
 
 function StreamMessageQueue:send(data)
-    --DEBUG("send", data)
     local msg = czmq.zmsg_new()
     czmq.zmsg_addmem(msg, self.id, #self.id)
     czmq.zmsg_addmem(msg, data, #data)

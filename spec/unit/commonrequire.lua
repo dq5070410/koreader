@@ -1,10 +1,17 @@
 require "defaults"
-package.path = "?.lua;common/?.lua;frontend/?.lua;" .. package.path
-package.cpath = "?.so;common/?.so;/usr/lib/lua/?.so;" .. package.cpath
+package.path = "?.lua;common/?.lua;rocks/share/lua/5.1/?.lua;frontend/?.lua;" .. package.path
+package.cpath = "?.so;common/?.so;/usr/lib/lua/?.so;rocks/lib/lua/5.1/?.so;" .. package.cpath
+
+-- turn off debug by default and set log level to warning
+require("dbg"):turnOff()
+local logger = require("logger")
+logger:setLevel(logger.levels.warn)
 
 -- global reader settings
+local DataStorage = require("datastorage")
+os.remove(DataStorage:getDataDir().."/settings.reader.lua")
 local DocSettings = require("docsettings")
-G_reader_settings = DocSettings:open(".reader")
+G_reader_settings = require("luasettings"):open(".reader")
 
 -- global einkfb for Screen (do not show SDL window)
 einkfb = require("ffi/framebuffer")
@@ -18,6 +25,28 @@ Screen:init()
 local Input = require("device").input
 Input.dummy = true
 
--- turn on debug
-local DEBUG = require("dbg")
-DEBUG:turnOn()
+function assertAlmostEquals(expected, actual, margin)
+    if type(actual) ~= 'number' or type(expected) ~= 'number'
+        or type(margin) ~= 'number' then
+        error('assertAlmostEquals: must supply only number arguments.', 2)
+    end
+
+    assert(math.abs(expected - actual) <= margin,
+        'Values are not almost equal\n'
+            .. 'Expected: ' .. expected .. ' with margin of ' .. margin
+            .. ', received: ' .. actual
+    )
+end
+
+function assertNotAlmostEquals(expected, actual, margin)
+    if type(actual) ~= 'number' or type(expected) ~= 'number'
+        or type(margin) ~= 'number' then
+        error('assertAlmostEquals: must supply only number arguments.', 2)
+    end
+
+    assert(math.abs(expected - actual) > margin,
+        'Values are almost equal\n'
+            .. 'Expected: ' .. expected .. ' with margin of ' .. margin
+            .. ', received: ' .. actual
+    )
+end

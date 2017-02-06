@@ -1,142 +1,147 @@
 local DocumentRegistry = require("document/documentregistry")
 local UIManager = require("ui/uimanager")
-local Screen = require("device").screen
+local Device = require("device")
+local Screen = Device.screen
 local DocSettings = require("docsettings")
-local DEBUG = require("dbg")
-local _ = require("gettext")
+local logger = require("logger")
 
 local Screensaver = {
 }
 
-function Screensaver:getCoverImage(file)
-    local ImageWidget = require("ui/widget/imagewidget")
-    local CenterContainer = require("ui/widget/container/centercontainer")
-    local FrameContainer = require("ui/widget/container/framecontainer")
-    local AlphaContainer = require("ui/widget/container/alphacontainer")
-    local image_height
-    local image_width
-    local screen_height = Screen:getHeight()
-    local screen_width = Screen:getWidth()
-    local doc = DocumentRegistry:openDocument(file)
-    if doc then
-        local image = doc:getCoverPageImage()
-        doc:close()
-        local lastfile = G_reader_settings:readSetting("lastfile")
-        local data = DocSettings:open(lastfile)
-        local proportional_cover = data:readSetting("proportional_screensaver")
-        if image then
-            if proportional_cover then
-                image_height = image:getHeight()
-                image_width = image:getWidth()
-                local image_ratio = image_width / image_height
-                local screen_ratio = screen_width / screen_height
-                if image_ratio < 1 then
-                    image_height = screen_height
-                    image_width = image_height * image_ratio
-                else
-                    image_width = screen_width
-                    image_height = image_width / image_ratio
-                end
-            else
-                image_height = screen_height
-                image_width = screen_width
-            end
-            local image_widget = ImageWidget:new{
-                image = image,
-                width = image_width,
-                height = image_height,
+local function createWidgetFromImage(image_widget)
+    if image_widget then
+        local AlphaContainer = require("ui/widget/container/alphacontainer")
+        local CenterContainer = require("ui/widget/container/centercontainer")
+        return AlphaContainer:new{
+            alpha = 1,
+            height = Screen:getHeight(),
+            width = Screen:getWidth(),
+            CenterContainer:new{
+                dimen = Screen:getSize(),
+                image_widget,
             }
-            return AlphaContainer:new{
-                alpha = 1,
-                height = screen_height,
-                width = screen_width,
-                CenterContainer:new{
-                    dimen = Screen:getSize(),
-                    FrameContainer:new{
-                        bordersize = 0,
-                        padding = 0,
-                        height = screen_height,
-                        width = screen_width,
-                        image_widget
-                    }
-                }
-            }
-        end
+        }
     end
 end
 
-function Screensaver:getRandomImage(dir)
-    local ImageWidget = require("ui/widget/imagewidget")
+local function createWidgetFromFile(file)
+    if lfs.attributes(file, "mode") == "file" then
+        local ImageWidget = require("ui/widget/imagewidget")
+        return createWidgetFromImage(
+                   ImageWidget:new{
+                       file = file,
+                       file_do_cache = false,
+                       height = Screen:getHeight(),
+                       width = Screen:getWidth(),
+                       scale_factor = 0, -- scale to fit height/width
+                   })
+    end
+end
+
+local function getRandomImage(dir)
+    if string.sub(dir, string.len(dir)) ~= "/" then
+       dir = dir .. "/"
+    end
     local pics = {}
     local i = 0
     math.randomseed(os.time())
     for entry in lfs.dir(dir) do
         if lfs.attributes(dir .. entry, "mode") == "file" then
-            local extension = string.lower(string.match(entry, ".+%.([^.]+)") or "")
-            if extension == "jpg" or extension == "jpeg" or extension == "png" then
+            local extension =
+                string.lower(string.match(entry, ".+%.([^.]+)") or "")
+            if extension == "jpg"
+            or extension == "jpeg"
+            or extension == "png" then
                 i = i + 1
                 pics[i] = entry
             end
         end
     end
-    local image = pics[math.random(i)]
+    if i == 0 then
+        return nil
+    end
+    return createWidgetFromFile(dir .. pics[math.random(i)])
+end
+
+function Screensaver:isUsingBookCover()
+    -- this setting is on by default
+    return G_reader_settings:readSetting('use_lastfile_as_screensaver') ~= false
+end
+
+function Screensaver:getCoverImage(file)
+    local ImageWidget = require("ui/widget/imagewidget")
+    local doc = DocumentRegistry:openDocument(file)
+    if not doc then return end
+
+    local image = doc:getCoverPageImage()
+    doc:close()
+    local lastfile = G_reader_settings:readSetting("lastfile")
+    local doc_settings = DocSettings:open(lastfile)
     if image then
-        image = dir .. image
-        if lfs.attributes(image, "mode") == "file" then
-            return ImageWidget:new{
-                file = image,
-                width = Screen:getWidth(),
-                height = Screen:getHeight(),
-            }
-        end
+        local img_widget = ImageWidget:new{
+            image = image,
+            height = Screen:getHeight(),
+            width = Screen:getWidth(),
+            scale_factor = doc_settings:readSetting("proportional_screensaver") and 0 or nil,
+        }
+        return createWidgetFromImage(img_widget)
     end
 end
 
-function Screensaver:show()
-    DEBUG("show screensaver")
+function Screensaver:show(kind, default_msg)
+    logger.dbg("show screensaver")
     local InfoMessage = require("ui/widget/infomessage")
-    -- first check book cover image
-    if KOBO_SCREEN_SAVER_LAST_BOOK then
+    local screensaver_settings = G_reader_settings:readSetting(kind .. "_screensaver") or {}
+    -- first check book cover image, on by default
+    local screensaver_last_book = screensaver_settings.use_last_file or
+        G_reader_settings:readSetting("use_lastfile_as_screensaver")
+    if screensaver_last_book == nil or screensaver_last_book then
         local lastfile = G_reader_settings:readSetting("lastfile")
         if lastfile then
-            local data = DocSettings:open(lastfile)
-            local exclude = data:readSetting("exclude_screensaver")
+            local doc_settings = DocSettings:open(lastfile)
+            local exclude = doc_settings:readSetting("exclude_screensaver")
             if not exclude then
-                self.suspend_msg = self:getCoverImage(lastfile)
+                self.left_msg = self:getCoverImage(lastfile)
             end
         end
     end
     -- then screensaver directory or file image
-    if not self.suspend_msg then
-        if type(KOBO_SCREEN_SAVER) == "string" then
-            local file = KOBO_SCREEN_SAVER
-            if lfs.attributes(file, "mode") == "directory" then
-                if string.sub(file,string.len(file)) ~= "/" then
-                   file = file .. "/"
+    if not self.left_msg then
+        -- FIXME: rename screensaver_folder to screensaver_path
+        local screensaver_path = screensaver_settings.path or
+            G_reader_settings:readSetting("screensaver_folder")
+        if screensaver_path == nil
+        and Device.internal_storage_mount_point ~= nil then
+            screensaver_path =
+                Device.internal_storage_mount_point .. "screensaver"
+        end
+        if screensaver_path then
+            local mode = lfs.attributes(screensaver_path, "mode")
+            if mode ~= nil then
+                if mode == "directory" then
+                    self.left_msg = getRandomImage(screensaver_path)
+                else
+                    self.left_msg = createWidgetFromFile(screensaver_path)
                 end
-                self.suspend_msg = self:getRandomImage(file)
-            elseif lfs.attributes(file, "mode") == "file" then
-                local ImageWidget = require("ui/widget/imagewidget")
-                self.suspend_msg = ImageWidget:new{
-                    file = file,
-                    width = Screen:getWidth(),
-                    height = Screen:getHeight(),
-                }
             end
         end
     end
-    -- fallback to suspended message
-    if not self.suspend_msg then
-        self.suspend_msg = InfoMessage:new{ text = _("Suspended") }
+    -- fallback to message box
+    if not self.left_msg then
+        local msg = screensaver_settings.message or default_msg
+        self.left_msg = InfoMessage:new{ text = msg }
+        UIManager:show(self.left_msg)
+    else
+        -- refresh whole screen for other types
+        UIManager:show(self.left_msg, "full")
     end
-    UIManager:show(self.suspend_msg)
 end
 
 function Screensaver:close()
-    DEBUG("close screensaver")
-    if self.suspend_msg then
-        UIManager:close(self.suspend_msg)
-        self.suspend_msg = nil
+    logger.dbg("close screensaver")
+    if self.left_msg then
+        UIManager:close(self.left_msg)
+        self.left_msg = nil
     end
 end
 

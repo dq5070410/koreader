@@ -1,13 +1,12 @@
 local CreOptions = require("ui/data/creoptions")
 local Document = require("document/document")
-local Configurable = require("configurable")
 local Blitbuffer = require("ffi/blitbuffer")
 local lfs = require("libs/libkoreader-lfs")
+local DataStorage = require("datastorage")
 local Geom = require("ui/geometry")
-local Device = require("device")
 local Screen = require("device").screen
 local Font = require("ui/font")
-local DEBUG = require("dbg")
+local logger = require("logger")
 local ffi = require("ffi")
 
 local CreDocument = Document:new{
@@ -22,7 +21,7 @@ local CreDocument = Document:new{
     line_space_percent = 100,
     default_font = G_reader_settings:readSetting("cre_font") or "Noto Serif",
     header_font = G_reader_settings:readSetting("header_font") or "Noto Sans",
-    fallback_font = G_reader_settings:readSetting("fallback_font") or "Droid Sans Fallback H",
+    fallback_font = G_reader_settings:readSetting("fallback_font") or "Noto Sans CJK SC",
     default_css = "./data/cr3.css",
     options = CreOptions,
 }
@@ -44,11 +43,12 @@ function CreDocument:cacheInit()
     if lfs.attributes("./cr3cache", "mode") == "directory" then
         os.execute("rm -r ./cr3cache")
     end
-    cre.initCache("./cache/cr3cache", 1024*1024*32)
+    cre.initCache(DataStorage:getDataDir() .. "/cache/cr3cache", 1024*1024*32)
 end
 
 function CreDocument:engineInit()
-    if not engine_initilized then
+    if not self.engine_initilized then
+        require "libs/libkoreader-cre"
         -- initialize cache
         self:cacheInit()
 
@@ -58,20 +58,19 @@ function CreDocument:engineInit()
         -- we need to initialize the CRE font list
         local fonts = Font:getFontList()
         for _k, _v in ipairs(fonts) do
-            if _v:sub(1, 4) ~= "urw/" then
-                local ok, err = pcall(cre.registerFont, Font.fontdir..'/'.._v)
+            if not _v:find("/urw/") then
+                local ok, err = pcall(cre.registerFont, _v)
                 if not ok then
-                    DEBUG(err)
+                    logger.err("failed to register crengine font", err)
                 end
             end
         end
 
-        engine_initilized = true
+        self.engine_initilized = true
     end
 end
 
 function CreDocument:init()
-    require "libs/libkoreader-cre"
     self:engineInit()
     self.configurable:loadDefaults(self.options)
 
@@ -149,8 +148,23 @@ function CreDocument:getCoverPageImage()
     if data and size then
         local Mupdf = require("ffi/mupdf")
         local ok, image = pcall(Mupdf.renderImage, data, size)
+        ffi.C.free(data)
         if ok then
-            ffi.C.free(data)
+            return image
+        end
+    end
+end
+
+function CreDocument:getImageFromPosition(pos)
+    local data, size = self._document:getImageDataFromPosition(pos.x, pos.y)
+    if data and size then
+        logger.dbg("CreDocument: got image data from position", data, size)
+        local Mupdf = require("ffi/mupdf")
+        -- wrapped with pcall so we always free(data)
+        local ok, image = pcall(Mupdf.renderImage, data, size)
+        ffi.C.free(data) -- need that explicite clean
+        logger.dbg("Mupdf.renderImage", ok, image)
+        if ok then
             return image
         end
     end
@@ -158,9 +172,9 @@ end
 
 function CreDocument:getWordFromPosition(pos)
     local word_box = self._document:getWordFromPosition(pos.x, pos.y)
-    DEBUG("CreDocument: get word box", word_box)
+    logger.dbg("CreDocument: get word box", word_box)
     local text_range = self._document:getTextFromPositions(pos.x, pos.y, pos.x, pos.y)
-    DEBUG("CreDocument: get text range", text_range)
+    logger.dbg("CreDocument: get text range", text_range)
     local wordbox = {
         word = text_range.text == "" and word_box.word or text_range.text,
         page = self._document:getCurrentPage(),
@@ -183,9 +197,9 @@ end
 
 function CreDocument:getTextFromPositions(pos0, pos1)
     local text_range = self._document:getTextFromPositions(pos0.x, pos0.y, pos1.x, pos1.y)
-    DEBUG("CreDocument: get text range", text_range)
+    logger.dbg("CreDocument: get text range", text_range)
     if text_range then
-        local line_boxes = self:getScreenBoxesFromPositions(text_range.pos0, text_range.pos1)
+        -- local line_boxes = self:getScreenBoxesFromPositions(text_range.pos0, text_range.pos1)
         return {
             text = text_range.text,
             pos0 = text_range.pos0,
@@ -199,7 +213,6 @@ function CreDocument:getScreenBoxesFromPositions(pos0, pos1)
     local line_boxes = {}
     if pos0 and pos1 then
         local word_boxes = self._document:getWordBoxesFromPositions(pos0, pos1)
-        --DEBUG("word boxes", word_boxes)
         for i = 1, #word_boxes do
             local line_box = word_boxes[i]
             table.insert(line_boxes, Geom:new{
@@ -208,7 +221,6 @@ function CreDocument:getScreenBoxesFromPositions(pos0, pos1)
                 h = line_box.y1 - line_box.y0,
             })
         end
-        --DEBUG("line boxes", line_boxes)
     end
     return line_boxes
 end
@@ -245,12 +257,16 @@ function CreDocument:renderPage(pageno, rect, zoom, rotation)
 end
 
 function CreDocument:gotoXPointer(xpointer)
-    DEBUG("CreDocument: goto xpointer", xpointer)
+    logger.dbg("CreDocument: goto xpointer", xpointer)
     self._document:gotoXPointer(xpointer)
 end
 
 function CreDocument:getXPointer()
     return self._document:getXPointer()
+end
+
+function CreDocument:isXPointerInDocument(xp)
+    return self._document:isXPointerInDocument(xp)
 end
 
 function CreDocument:getPosFromXPointer(xp)
@@ -278,27 +294,27 @@ function CreDocument:getLinkFromPosition(pos)
 end
 
 function Document:gotoPos(pos)
-    DEBUG("CreDocument: goto position", pos)
+    logger.dbg("CreDocument: goto position", pos)
     self._document:gotoPos(pos)
 end
 
 function CreDocument:gotoPage(page)
-    DEBUG("CreDocument: goto page", page)
+    logger.dbg("CreDocument: goto page", page)
     self._document:gotoPage(page)
 end
 
 function CreDocument:gotoLink(link)
-    DEBUG("CreDocument: goto link", link)
+    logger.dbg("CreDocument: goto link", link)
     self._document:gotoLink(link)
 end
 
 function CreDocument:goBack()
-    DEBUG("CreDocument: go back")
+    logger.dbg("CreDocument: go back")
     self._document:goBack()
 end
 
 function CreDocument:goForward(link)
-    DEBUG("CreDocument: go forward")
+    logger.dbg("CreDocument: go forward")
     self._document:goForward()
 end
 
@@ -308,13 +324,20 @@ end
 
 function CreDocument:setFontFace(new_font_face)
     if new_font_face then
-        DEBUG("CreDocument: set font face", new_font_face)
+        logger.dbg("CreDocument: set font face", new_font_face)
         self._document:setStringProperty("font.face.default", new_font_face)
     end
 end
 
+function CreDocument:setHyphDictionary(new_hyph_dictionary)
+    if new_hyph_dictionary then
+        logger.dbg("CreDocument: set hyphenation dictionary", new_hyph_dictionary)
+        self._document:setStringProperty("crengine.hyphenation.directory", new_hyph_dictionary)
+    end
+end
+
 function CreDocument:clearSelection()
-    DEBUG("clear selection")
+    logger.dbg("clear selection")
     self._document:clearSelection()
 end
 
@@ -324,14 +347,14 @@ end
 
 function CreDocument:setFontSize(new_font_size)
     if new_font_size then
-        DEBUG("CreDocument: set font size", new_font_size)
+        logger.dbg("CreDocument: set font size", new_font_size)
         self._document:setFontSize(new_font_size)
     end
 end
 
 function CreDocument:setViewMode(new_mode)
     if new_mode then
-        DEBUG("CreDocument: set view mode", new_mode)
+        logger.dbg("CreDocument: set view mode", new_mode)
         if new_mode == "scroll" then
             self._document:setViewMode(self.SCROLL_VIEW_MODE)
         else
@@ -341,50 +364,50 @@ function CreDocument:setViewMode(new_mode)
 end
 
 function CreDocument:setViewDimen(dimen)
-    DEBUG("CreDocument: set view dimen", dimen)
+    logger.dbg("CreDocument: set view dimen", dimen)
     self._document:setViewDimen(dimen.w, dimen.h)
 end
 
 function CreDocument:setHeaderFont(new_font)
     if new_font then
-        DEBUG("CreDocument: set header font", new_font)
+        logger.dbg("CreDocument: set header font", new_font)
         self._document:setHeaderFont(new_font)
     end
 end
 
 function CreDocument:zoomFont(delta)
-    DEBUG("CreDocument: zoom font", delta)
+    logger.dbg("CreDocument: zoom font", delta)
     self._document:zoomFont(delta)
 end
 
 function CreDocument:setInterlineSpacePercent(percent)
-    DEBUG("CreDocument: set interline space", percent)
+    logger.dbg("CreDocument: set interline space", percent)
     self._document:setDefaultInterlineSpace(percent)
 end
 
 function CreDocument:toggleFontBolder(toggle)
-    DEBUG("CreDocument: toggle font bolder", toggle)
+    logger.dbg("CreDocument: toggle font bolder", toggle)
     self._document:setIntProperty("font.face.weight.embolden", toggle)
 end
 
 function CreDocument:setGammaIndex(index)
-    DEBUG("CreDocument: set gamma index", index)
+    logger.dbg("CreDocument: set gamma index", index)
     cre.setGammaIndex(index)
 end
 
 function CreDocument:setStyleSheet(new_css)
-    DEBUG("CreDocument: set style sheet", new_css)
+    logger.dbg("CreDocument: set style sheet", new_css)
     self._document:setStyleSheet(new_css)
 end
 
 function CreDocument:setEmbeddedStyleSheet(toggle)
     -- FIXME: occasional segmentation fault when switching embedded style sheet
-    DEBUG("CreDocument: set embedded style sheet", toggle)
+    logger.dbg("CreDocument: set embedded style sheet", toggle)
     self._document:setIntProperty("crengine.doc.embedded.styles.enabled", toggle)
 end
 
 function CreDocument:setPageMargins(left, top, right, bottom)
-    DEBUG("CreDocument: set page margins", left, top, right, bottom)
+    logger.dbg("CreDocument: set page margins", left, top, right, bottom)
     self._document:setIntProperty("crengine.page.margin.left", left)
     self._document:setIntProperty("crengine.page.margin.top", top)
     self._document:setIntProperty("crengine.page.margin.right", right)
@@ -393,7 +416,7 @@ end
 
 function CreDocument:setFloatingPunctuation(enabled)
     -- FIXME: occasional segmentation fault when toggling floating punctuation
-    DEBUG("CreDocument: set floating punctuation", enabled)
+    logger.dbg("CreDocument: set floating punctuation", enabled)
     self._document:setIntProperty("crengine.style.floating.punctuation.enabled", enabled)
 end
 
@@ -402,37 +425,41 @@ function CreDocument:getVisiblePageCount()
 end
 
 function CreDocument:setVisiblePageCount(new_count)
-    DEBUG("CreDocument: set visible page count", new_count)
+    logger.dbg("CreDocument: set visible page count", new_count)
     self._document:setVisiblePageCount(new_count)
 end
 
 function CreDocument:setBatteryState(state)
-    DEBUG("CreDocument: set battery state", state)
+    logger.dbg("CreDocument: set battery state", state)
     self._document:setBatteryState(state)
 end
 
 function CreDocument:isXPointerInCurrentPage(xp)
-    DEBUG("CreDocument: check in page", xp)
+    logger.dbg("CreDocument: check xpointer in current page", xp)
     return self._document:isXPointerInCurrentPage(xp)
 end
 
 function CreDocument:setStatusLineProp(prop)
-    DEBUG("CreDocument: set status line property", prop)
+    logger.dbg("CreDocument: set status line property", prop)
     self._document:setStringProperty("window.status.line", prop)
 end
 
 function CreDocument:findText(pattern, origin, reverse, caseInsensitive)
-    DEBUG("CreDocument: find text", pattern, origin, reverse, caseInsensitive)
-    return self._document:findText(pattern, origin, reverse, caseInsensitive)
+    logger.dbg("CreDocument: find text", pattern, origin, reverse, caseInsensitive)
+    return self._document:findText(
+        pattern, origin, reverse, caseInsensitive and 1 or 0)
 end
 
 function CreDocument:register(registry)
     registry:addProvider("txt", "application/txt", self)
+    registry:addProvider("txt.zip", "application/zip", self)
     registry:addProvider("epub", "application/epub", self)
     registry:addProvider("fb2", "application/fb2", self)
     registry:addProvider("fb2.zip", "application/zip", self)
     registry:addProvider("html", "application/html", self)
+    registry:addProvider("html.zip", "application/zip", self)
     registry:addProvider("htm", "application/htm", self)
+    registry:addProvider("htm.zip", "application/zip", self)
     registry:addProvider("rtf", "application/rtf", self)
     registry:addProvider("mobi", "application/mobi", self)
     registry:addProvider("prc", "application/prc", self)

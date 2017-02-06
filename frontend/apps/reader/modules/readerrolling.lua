@@ -2,13 +2,13 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local ReaderPanning = require("apps/reader/modules/readerpanning")
 local Screen = require("device").screen
 local Device = require("device")
-local Geom = require("ui/geometry")
 local Input = require("device").input
 local Event = require("ui/event")
-local GestureRange = require("ui/gesturerange")
 local UIManager = require("ui/uimanager")
-local DEBUG = require("dbg")
+local logger = require("logger")
 local _ = require("gettext")
+
+local pan_rate = Screen.eink and 4.0 or 10.0
 
 --[[
     Rolling is just like paging in page-based documents except that
@@ -34,12 +34,13 @@ local ReaderRolling = InputContainer:new{
     old_doc_height = nil,
     old_page = nil,
     current_pos = 0,
+    inverse_reading_order = false,
     -- only used for page view mode
     current_page= nil,
     doc_height = nil,
     xpointer = nil,
     panning_steps = ReaderPanning.panning_steps,
-    show_overlap_enable = true,
+    show_overlap_enable = nil,
     overlap = 20,
 }
 
@@ -94,109 +95,51 @@ function ReaderRolling:init()
         self.old_doc_height = self.doc_height
         self.old_page = self.ui.document.info.number_of_pages
     end)
-end
-
--- This method will  be called in onSetDimensions handler
-function ReaderRolling:initGesListener()
-    self.ges_events = {
-        TapForward = {
-            GestureRange:new{
-                ges = "tap",
-                range = Geom:new{
-                    x = Screen:getWidth()*DTAP_ZONE_FORWARD.x,
-                    y = Screen:getHeight()*DTAP_ZONE_FORWARD.y,
-                    w = Screen:getWidth()*DTAP_ZONE_FORWARD.w,
-                    h = Screen:getHeight()*DTAP_ZONE_FORWARD.h,
-                }
-            }
-        },
-        TapBackward = {
-            GestureRange:new{
-                ges = "tap",
-                range = Geom:new{
-                    x = Screen:getWidth()*DTAP_ZONE_BACKWARD.x,
-                    y = Screen:getHeight()*DTAP_ZONE_BACKWARD.y,
-                    w = Screen:getWidth()*DTAP_ZONE_BACKWARD.w,
-                    h = Screen:getHeight()*DTAP_ZONE_BACKWARD.h,
-                }
-            }
-        },
-        Swipe = {
-            GestureRange:new{
-                ges = "swipe",
-                range = Geom:new{
-                    x = 0, y = 0,
-                    w = Screen:getWidth(),
-                    h = Screen:getHeight(),
-                }
-            }
-        },
-        Pan = {
-            GestureRange:new{
-                ges = "pan",
-                range = Geom:new{
-                    x = 0, y = 0,
-                    w = Screen:getWidth(),
-                    h = Screen:getHeight(),
-                },
-                rate = Screen.eink and 4.0 or nil,
-            }
-        },
-        DoubleTapForward = {
-            GestureRange:new{
-                ges = "double_tap",
-                range = Geom:new{
-                    x = Screen:getWidth()*DDOUBLE_TAP_ZONE_NEXT_CHAPTER.x,
-                    y = Screen:getHeight()*DDOUBLE_TAP_ZONE_NEXT_CHAPTER.y,
-                    w = Screen:getWidth()*DDOUBLE_TAP_ZONE_NEXT_CHAPTER.w,
-                    h = Screen:getHeight()*DDOUBLE_TAP_ZONE_NEXT_CHAPTER.h,
-                }
-            }
-        },
-        DoubleTapBackward = {
-            GestureRange:new{
-                ges = "double_tap",
-                range = Geom:new{
-                    x = Screen:getWidth()*DDOUBLE_TAP_ZONE_PREV_CHAPTER.x,
-                    y = Screen:getHeight()*DDOUBLE_TAP_ZONE_PREV_CHAPTER.y,
-                    w = Screen:getWidth()*DDOUBLE_TAP_ZONE_PREV_CHAPTER.w,
-                    h = Screen:getHeight()*DDOUBLE_TAP_ZONE_PREV_CHAPTER.h,
-                }
-            }
-        },
-    }
+    self.ui.menu:registerToMainMenu(self)
 end
 
 function ReaderRolling:onReadSettings(config)
-    local soe = config:readSetting("show_overlap_enable")
-    if not soe then
-        self.show_overlap_enable = soe
-    end
     local last_xp = config:readSetting("last_xpointer")
     local last_per = config:readSetting("last_percent")
     if last_xp then
-        table.insert(self.ui.postInitCallback, function()
-            self.xpointer = last_xp
-            self:gotoXPointer(self.xpointer)
+        self.xpointer = last_xp
+        self.setupXpointer = function()
+            self:_gotoXPointer(self.xpointer)
             -- we have to do a real jump in self.ui.document._document to
             -- update status information in CREngine.
             self.ui.document:gotoXPointer(self.xpointer)
-        end)
+        end
     -- we read last_percent just for backward compatibility
+    -- FIXME: remove this branch with migration script
     elseif last_per then
-        table.insert(self.ui.postInitCallback, function()
-            self:gotoPercent(last_per)
-            -- we have to do a real pos change in self.ui.document._document
+        self.setupXpointer = function()
+            self:_gotoPercent(last_per)
+            -- _gotoPercent calls _gotoPos, which only updates self.current_pos
+            -- and self.view.
+            -- we need to do a real pos change in self.ui.document._document
             -- to update status information in CREngine.
             self.ui.document:gotoPos(self.current_pos)
+            -- _gotoPercent already calls gotoPos, so no need to emit
+            -- PosUpdate event in scroll mode
+            if self.view.view_mode == "page" then
+                self.ui:handleEvent(
+                    Event:new("PageUpdate", self.ui.document:getCurrentPage()))
+            end
             self.xpointer = self.ui.document:getXPointer()
-        end)
-    else
-        if self.view.view_mode == "page" then
-            self.ui:handleEvent(Event:new("PageUpdate", 1))
         end
-        self.xpointer = self.ui.document:getXPointer()
+    else
+        self.setupXpointer = function()
+            self.xpointer = self.ui.document:getXPointer()
+            if self.view.view_mode == "page" then
+                self.ui:handleEvent(Event:new("PageUpdate", 1))
+            end
+        end
     end
+    self.show_overlap_enable = config:readSetting("show_overlap_enable")
+    if self.show_overlap_enable == nil then
+        self.show_overlap_enable = DSHOWOVERLAP
+    end
+    self.inverse_reading_order = config:readSetting("inverse_reading_order") or false
 end
 
 function ReaderRolling:onSaveSettings()
@@ -204,6 +147,122 @@ function ReaderRolling:onSaveSettings()
     self.ui.doc_settings:saveSetting("last_percent", nil)
     self.ui.doc_settings:saveSetting("last_xpointer", self.xpointer)
     self.ui.doc_settings:saveSetting("percent_finished", self:getLastPercent())
+    self.ui.doc_settings:saveSetting("show_overlap_enable", self.show_overlap_enable)
+    self.ui.doc_settings:saveSetting("inverse_reading_order", self.inverse_reading_order)
+end
+
+function ReaderRolling:onReaderReady()
+    self:setupTouchZones()
+    self.setupXpointer()
+end
+
+function ReaderRolling:setupTouchZones()
+    self.ges_events = {}
+    self.onGesture = nil
+    if not Device:isTouchDevice() then return end
+
+    local forward_zone = {
+        ratio_x = DTAP_ZONE_FORWARD.x, ratio_y = DTAP_ZONE_FORWARD.y,
+        ratio_w = DTAP_ZONE_FORWARD.w, ratio_h = DTAP_ZONE_FORWARD.h,
+    }
+    local backward_zone = {
+        ratio_x = DTAP_ZONE_BACKWARD.x, ratio_y = DTAP_ZONE_BACKWARD.y,
+        ratio_w = DTAP_ZONE_BACKWARD.w, ratio_h = DTAP_ZONE_BACKWARD.h,
+    }
+
+    local forward_double_tap_zone = {
+        ratio_x = DDOUBLE_TAP_ZONE_NEXT_CHAPTER.x, ratio_y = DDOUBLE_TAP_ZONE_NEXT_CHAPTER.y,
+        ratio_w = DDOUBLE_TAP_ZONE_NEXT_CHAPTER.w, ratio_h = DDOUBLE_TAP_ZONE_NEXT_CHAPTER.h,
+    }
+    local backward_double_tap_zone = {
+        ratio_x = DDOUBLE_TAP_ZONE_PREV_CHAPTER.x, ratio_y = DDOUBLE_TAP_ZONE_PREV_CHAPTER.y,
+        ratio_w = DDOUBLE_TAP_ZONE_PREV_CHAPTER.w, ratio_h = DDOUBLE_TAP_ZONE_PREV_CHAPTER.h,
+    }
+
+    if self.inverse_reading_order then
+        forward_zone.ratio_x = 1 - forward_zone.ratio_x - forward_zone.ratio_w
+        backward_zone.ratio_x = 1 - backward_zone.ratio_x - backward_zone.ratio_w
+
+        forward_double_tap_zone.ratio_x =
+            1 - forward_double_tap_zone.ratio_x - forward_double_tap_zone.ratio_w
+        backward_double_tap_zone.ratio_x =
+            1 - backward_double_tap_zone.ratio_x - backward_double_tap_zone.ratio_w
+    end
+
+    self.ui:registerTouchZones({
+        {
+            id = "tap_forward",
+            ges = "tap",
+            screen_zone = forward_zone,
+            handler = function() return self:onTapForward() end
+        },
+        {
+            id = "tap_backward",
+            ges = "tap",
+            screen_zone = backward_zone,
+            handler = function() return self:onTapBackward() end
+        },
+        {
+            id = "double_tap_forward",
+            ges = "double_tap",
+            screen_zone = forward_double_tap_zone,
+            handler = function() return self:onDoubleTapForward() end
+        },
+        {
+            id = "double_tap_backward",
+            ges = "double_tap",
+            screen_zone = backward_double_tap_zone,
+            handler = function() return self:onDoubleTapBackward() end
+        },
+        {
+            id = "rolling_swipe",
+            ges = "swipe",
+            screen_zone = {
+                ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1,
+            },
+            handler = function(ges) return self:onSwipe(nil, ges) end
+        },
+        {
+            id = "rolling_pan",
+            ges = "pan",
+            rate = pan_rate,
+            screen_zone = {
+                ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1,
+            },
+            handler = function(ges) return self:onPan(nil, ges) end
+        },
+    })
+end
+
+function ReaderRolling:getLastProgress()
+    return self.xpointer
+end
+
+function ReaderRolling:addToMainMenu(tab_item_table)
+    -- FIXME: repeated code with page overlap menu for readerpaging
+    -- needs to keep only one copy of the logic as for the DRY principle.
+    -- The difference between the two menus is only the enabled func.
+    local page_overlap_menu = {
+        {
+            text_func = function()
+                return self.show_overlap_enable and _("Disable") or _("Enable")
+            end,
+            callback = function()
+                self.show_overlap_enable = not self.show_overlap_enable
+                if not self.show_overlap_enable then
+                    self.view:resetDimArea()
+                end
+            end
+        },
+    }
+    for _, menu_entry in ipairs(self.view:genOverlapStyleMenu()) do
+        table.insert(page_overlap_menu, menu_entry)
+    end
+    table.insert(tab_item_table.typeset, {
+        text = _("Page overlap"),
+        enabled_func = function() return self.view.view_mode ~= "page" end,
+        sub_item_table = page_overlap_menu,
+    })
 end
 
 function ReaderRolling:getLastPercent()
@@ -226,15 +285,19 @@ function ReaderRolling:onTapBackward()
     return true
 end
 
-function ReaderRolling:onSwipe(arg, ges)
-    if ges.direction == "west" or ges.direction == "north" then
-        if DCHANGE_WEST_SWIPE_TO_EAST then
+function ReaderRolling:onSwipe(_, ges)
+    if ges.direction == "north" then
+        self:onGotoViewRel(1)
+    elseif ges.direction == "south" then
+        self:onGotoViewRel(-1)
+    elseif ges.direction == "west" then
+        if self.inverse_reading_order then
             self:onGotoViewRel(-1)
         else
             self:onGotoViewRel(1)
         end
-    elseif ges.direction == "east" or ges.direction == "south" then
-        if DCHANGE_EAST_SWIPE_TO_WEST then
+    elseif ges.direction == "east" then
+        if self.inverse_reading_order then
             self:onGotoViewRel(1)
         else
             self:onGotoViewRel(-1)
@@ -242,12 +305,12 @@ function ReaderRolling:onSwipe(arg, ges)
     end
 end
 
-function ReaderRolling:onPan(arg, ges)
+function ReaderRolling:onPan(_, ges)
     if self.view.view_mode == "scroll" then
         if ges.direction == "north" then
-            self:gotoPos(self.current_pos + ges.distance)
+            self:_gotoPos(self.current_pos + ges.distance)
         elseif ges.direction == "south" then
-            self:gotoPos(self.current_pos - ges.distance)
+            self:_gotoPos(self.current_pos - ges.distance)
         end
     end
     return true
@@ -285,27 +348,44 @@ function ReaderRolling:onNotCharging()
 end
 
 function ReaderRolling:onGotoPercent(percent)
-    DEBUG("goto document offset in percent:", percent)
-    self:gotoPercent(percent)
+    logger.dbg("goto document offset in percent:", percent)
+    self:_gotoPercent(percent)
+    self.xpointer = self.ui.document:getXPointer()
     return true
 end
 
 function ReaderRolling:onGotoPage(number)
     if number then
-        self:gotoPage(number)
+        self:_gotoPage(number)
+    end
+    self.xpointer = self.ui.document:getXPointer()
+    return true
+end
+
+function ReaderRolling:onGotoRelativePage(number)
+    if number then
+        self:_gotoPage(self.current_page + number)
     end
     self.xpointer = self.ui.document:getXPointer()
     return true
 end
 
 function ReaderRolling:onGotoXPointer(xp)
-    self:gotoXPointer(xp)
+    self:_gotoXPointer(xp)
     self.xpointer = xp
     return true
 end
 
+function ReaderRolling:getBookLocation()
+    return self.xpointer
+end
+
+function ReaderRolling:onRestoreBookLocation(saved_location)
+    return self:onGotoXPointer(saved_location)
+end
+
 function ReaderRolling:onGotoViewRel(diff)
-    DEBUG("goto relative screen:", diff, ", in mode: ", self.view.view_mode)
+    logger.dbg("goto relative screen:", diff, ", in mode: ", self.view.view_mode)
     if self.view.view_mode == "scroll" then
         local pan_diff = diff * self.ui.dimen.h
         if self.show_overlap_enable then
@@ -315,20 +395,27 @@ function ReaderRolling:onGotoViewRel(diff)
                 pan_diff = pan_diff + self.overlap
             end
         end
-        self:gotoPos(self.current_pos + pan_diff)
+        local old_pos = self.current_pos
+        self:_gotoPos(self.current_pos + pan_diff)
+        if diff > 0 and old_pos == self.current_pos then
+            self.ui:handleEvent(Event:new("EndOfBook"))
+        end
     elseif self.view.view_mode == "page" then
         local page_count = self.ui.document:getVisiblePageCount()
-        self:gotoPage(self.current_page + diff*page_count)
+        local old_page = self.current_page
+        self:_gotoPage(self.current_page + diff*page_count)
+        if diff > 0 and old_page == self.current_page then
+            self.ui:handleEvent(Event:new("EndOfBook"))
+        end
     end
     self.xpointer = self.ui.document:getXPointer()
     return true
 end
 
-function ReaderRolling:onPanning(args, key)
+function ReaderRolling:onPanning(args, _)
     --@TODO disable panning in page view_mode?  22.12 2012 (houqp)
     local _, dy = unpack(args)
-    DEBUG("key =", key)
-    self:gotoPos(self.current_pos + dy * self.panning_steps.normal)
+    self:_gotoPos(self.current_pos + dy * self.panning_steps.normal)
     self.xpointer = self.ui.document:getXPointer()
     return true
 end
@@ -355,12 +442,12 @@ function ReaderRolling:updatePos()
     local new_height = self.ui.document.info.doc_height
     local new_page = self.ui.document.info.number_of_pages
     if self.old_doc_height ~= new_height or self.old_page ~= new_page then
-        self:gotoXPointer(self.xpointer)
+        self:_gotoXPointer(self.xpointer)
         self.old_doc_height = new_height
         self.old_page = new_page
         self.ui:handleEvent(Event:new("UpdateToc"))
     end
-    UIManager.repaint_all = true
+    UIManager:setDirty(self.view.dialog, "partial")
 end
 
 --[[
@@ -372,10 +459,10 @@ function ReaderRolling:onChangeViewMode()
     self.old_page = self.ui.document.info.number_of_pages
     self.ui:handleEvent(Event:new("UpdateToc"))
     if self.xpointer then
-        self:gotoXPointer(self.xpointer)
+        self:_gotoXPointer(self.xpointer)
     else
         table.insert(self.ui.postInitCallback, function()
-            self:gotoXPointer(self.xpointer)
+            self:_gotoXPointer(self.xpointer)
         end)
     end
     return true
@@ -391,10 +478,6 @@ function ReaderRolling:onRedrawCurrentView()
 end
 
 function ReaderRolling:onSetDimensions(dimen)
-    -- update listening according to new screen dimen
-    if Device:isTouchDevice() then
-        self:initGesListener()
-    end
     self.ui.document:setViewDimen(Screen:getSize())
 end
 
@@ -408,7 +491,7 @@ end
 --[[
     PosUpdate event is used to signal other widgets that pos has been changed.
 --]]
-function ReaderRolling:gotoPos(new_pos)
+function ReaderRolling:_gotoPos(new_pos)
     if new_pos == self.current_pos then return end
     if new_pos < 0 then new_pos = 0 end
     if new_pos > self.doc_height then new_pos = self.doc_height end
@@ -427,20 +510,20 @@ function ReaderRolling:gotoPos(new_pos)
     self.ui:handleEvent(Event:new("PosUpdate", new_pos))
 end
 
-function ReaderRolling:gotoPercent(new_percent)
-    self:gotoPos(new_percent * self.doc_height / 10000)
+function ReaderRolling:_gotoPercent(new_percent)
+    self:_gotoPos(new_percent * self.doc_height / 10000)
 end
 
-function ReaderRolling:gotoPage(new_page)
+function ReaderRolling:_gotoPage(new_page)
     self.ui.document:gotoPage(new_page)
     self.ui:handleEvent(Event:new("PageUpdate", self.ui.document:getCurrentPage()))
 end
 
-function ReaderRolling:gotoXPointer(xpointer)
+function ReaderRolling:_gotoXPointer(xpointer)
     if self.view.view_mode == "page" then
-        self:gotoPage(self.ui.document:getPageFromXPointer(xpointer))
+        self:_gotoPage(self.ui.document:getPageFromXPointer(xpointer))
     else
-        self:gotoPos(self.ui.document:getPosFromXPointer(xpointer))
+        self:_gotoPos(self.ui.document:getPosFromXPointer(xpointer))
     end
 end
 
@@ -449,15 +532,16 @@ currently we don't need to get page links on each page/pos update
 since we can check link on the fly when tapping on the screen
 --]]
 function ReaderRolling:updatePageLink()
-    DEBUG("update page link")
+    logger.dbg("update page link")
     local links = self.ui.document:getPageLinks()
     self.view.links = links
 end
 
 function ReaderRolling:updateBatteryState()
-    DEBUG("update battery state")
+    logger.dbg("update battery state")
     if self.view.view_mode == "page" then
         local powerd = Device:getPowerDevice()
+        -- -1 is CR_BATTERY_STATE_CHARGING @ crengine/crengine/include/lvdocview.h
         local state = powerd:isCharging() and -1 or powerd:getCapacity()
         if state then
             self.ui.document:setBatteryState(state)

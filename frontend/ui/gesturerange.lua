@@ -11,8 +11,8 @@ local GestureRange = {
     scale = nil,
 }
 
-function GestureRange:new(o)
-    local o = o or {}
+function GestureRange:new(from_o)
+    local o = from_o or {}
     setmetatable(o, self)
     self.__index = self
     return o
@@ -29,7 +29,7 @@ function GestureRange:match(gs)
         -- e.g. range = function() return self.dimen end
         -- for inputcontainer given that the x and y field of `self.dimen` is only
         -- filled when the inputcontainer is painted into blitbuffer
-        local range = nil
+        local range
         if type(self.range) == "function" then
             range = self.range()
         else
@@ -39,6 +39,7 @@ function GestureRange:match(gs)
             return false
         end
     end
+
     if self.rate then
         -- This filed restraints the upper limit rate(matches per second).
         -- It's most useful for e-ink devices with less powerfull CPUs and

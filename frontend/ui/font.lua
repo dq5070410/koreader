@@ -1,7 +1,12 @@
+--[[--
+Font module.
+]]
+
 local lfs = require("libs/libkoreader-lfs")
 local Freetype = require("ffi/freetype")
 local Screen = require("device").screen
-local DEBUG = require("dbg")
+local Device = require("device")
+local logger = require("logger")
 
 local Font = {
     fontmap = {
@@ -34,76 +39,126 @@ local Font = {
         -- font for info messages
         infofont = "noto/NotoSans-Regular.ttf",
     },
+    sizemap = {
+        cfont = 24,
+        tfont = 26,
+        ffont = 20,
+        pgfont = 20,
+        scfont = 20,
+        rifont = 16,
+        hpkfont = 20,
+        hfont = 24,
+        infont = 22,
+        infofont = 24,
+    },
     fallbacks = {
-        [1] = "droid/DroidSansFallback.ttc",
+        [1] = "noto/NotoSansCJK-Regular.ttf",
         [2] = "noto/NotoSans-Regular.ttf",
-        [3] = "droid/DroidSans.ttf",
-        [4] = "freefont/FreeSans.ttf",
+        [3] = "freefont/FreeSans.ttf",
     },
 
-    fontdir = os.getenv("FONTDIR") or "./fonts",
+    fontdir = "./fonts",
 
     -- face table
     faces = {},
 }
 
-
 function Font:getFace(font, size)
-    if not font then
-        -- default to content font
-        font = self.cfont
-    end
+    -- default to content font
+    if not font then font = self.cfont end
 
+    if not size then size = self.sizemap[font] end
     -- original size before scaling by screen DPI
     local orig_size = size
-    local size = Screen:scaleByDPI(size)
+    size = Screen:scaleBySize(size)
 
-    local face = self.faces[font..size]
+    local hash = font..size
+    local face_obj = self.faces[hash]
     -- build face if not found
-    if not face then
+    if not face_obj then
         local realname = self.fontmap[font]
         if not realname then
             realname = font
         end
         realname = self.fontdir.."/"..realname
-        ok, face = pcall(Freetype.newFace, realname, size)
+        local ok, face = pcall(Freetype.newFace, realname, size)
         if not ok then
-            DEBUG("#! Font "..font.." ("..realname..") not supported: "..face)
+            logger.warn("#! Font ", font, " (", realname, ") not supported: ", face)
             return nil
         end
-        self.faces[font..size] = face
-    --DEBUG("getFace, found: "..realname.." size:"..size)
+        --- Freetype font face wrapper object
+        -- @table FontFaceObj
+        -- @field size size of the font face (after scaled by screen size)
+        -- @field orig_size raw size of the font face (before scale)
+        -- @field ftface font face object from freetype
+        -- @field hash hash key for this font face
+        face_obj = {
+            size = size,
+            orig_size = orig_size,
+            ftface = face,
+            hash = hash
+        }
+        self.faces[hash] = face_obj
     end
-    return { size = size, orig_size = orig_size, ftface = face, hash = font..size }
+    return face_obj
 end
 
-function Font:_readList(target, dir, effective_dir)
-    for f in lfs.dir(dir) do
+--[[
+    These fonts from Kindle system cannot be loaded by Freetype.
+--]]
+local kindle_fonts_blacklist = {
+    ["HYGothicBold.ttf"] = true,
+    ["HYGothicMedium.ttf"] = true,
+    ["HYMyeongJoBold.ttf"] = true,
+    ["HYMyeongJoMedium.ttf"] = true,
+    ["MYingHeiTBold.ttf"] = true,
+    ["MYingHeiTMedium.ttf"] = true,
+    ["SongTBold.ttf"] = true,
+    ["SongTMedium.ttf"] = true,
+}
+
+local function isInFontsBlacklist(f)
+    if Device:isKindle() then
+        return kindle_fonts_blacklist[f]
+    end
+end
+
+function Font:_readList(target, dir)
+    -- lfs.dir non-exsitent directory will give error, weird!
+    local ok, iter, dir_obj = pcall(lfs.dir, dir)
+    if not ok then return end
+    for f in iter, dir_obj do
         if lfs.attributes(dir.."/"..f, "mode") == "directory" and f ~= "." and f ~= ".." then
-            self:_readList(target, dir.."/"..f, effective_dir..f.."/")
+            self:_readList(target, dir.."/"..f)
         else
             local file_type = string.lower(string.match(f, ".+%.([^.]+)") or "")
             if file_type == "ttf" or file_type == "ttc"
                 or file_type == "cff" or file_type == "otf" then
-                table.insert(target, effective_dir..f)
+                if not isInFontsBlacklist(f) then
+                    table.insert(target, dir.."/"..f)
+                end
             end
         end
     end
 end
 
-function Font:getFontList()
-    fontlist = {}
-    self:_readList(fontlist, self.fontdir, "")
-    table.sort(fontlist)
-    return fontlist
+function Font:_getExternalFontDir()
+    if Device:isAndroid() then
+        return ANDROID_FONT_DIR
+    else
+        return os.getenv("EXT_FONT_DIR")
+    end
 end
 
-function Font:update()
-    for _k, _v in ipairs(self.faces) do
-        _v:done()
+function Font:getFontList()
+    local fontlist = {}
+    self:_readList(fontlist, self.fontdir)
+    -- multiple paths should be joined with semicolon
+    for dir in string.gmatch(self:_getExternalFontDir() or "", "([^;]+)") do
+        self:_readList(fontlist, dir)
     end
-    self.faces = {}
-    clearGlyphCache()
+    table.sort(fontlist)
+    return fontlist
 end
 
 return Font

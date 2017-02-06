@@ -2,12 +2,13 @@ local Cache = require("cache")
 local CacheItem = require("cacheitem")
 local KoptOptions = require("ui/data/koptoptions")
 local Document = require("document/document")
-local Configurable = require("configurable")
 local DrawContext = require("ffi/drawcontext")
-local DEBUG = require("dbg")
+local logger = require("logger")
+local util = require("util")
 
 local PdfDocument = Document:new{
     _document = false,
+    is_pdf = true,
     dc_null = DrawContext.new(),
     options = KoptOptions,
     koptinterface = nil,
@@ -30,18 +31,19 @@ function PdfDocument:init()
     else
         self:_readMetadata()
     end
-    if not (self.info.number_of_pages > 0) then
-        error("No page found in PDF file")
-    end
+    -- TODO: handle this
+    -- if not (self.info.number_of_pages > 0) then
+        --error("No page found in PDF file")
+    -- end
 end
 
 function PdfDocument:unlock(password)
     if not self._document:authenticatePassword(password) then
-        self._document:close()
-        return false, "wrong password"
+        return false
     end
     self.is_locked = false
-    return self:_readMetadata()
+    self:_readMetadata()
+    return true
 end
 
 function PdfDocument:getPageTextBoxes(pageno)
@@ -75,8 +77,8 @@ function PdfDocument:getOCRText(pageno, tboxes)
     return self.koptinterface:getOCRText(self, pageno, tboxes)
 end
 
-function PdfDocument:getPageRegions(pageno)
-    return self.koptinterface:getPageRegions(self, pageno)
+function PdfDocument:getPageBlock(pageno, x, y)
+    return self.koptinterface:getPageBlock(self, pageno, x, y)
 end
 
 function PdfDocument:getUsedBBox(pageno)
@@ -148,7 +150,7 @@ function PdfDocument:saveHighlight(pageno, item)
 end
 
 function PdfDocument:writeDocument()
-    DEBUG("writing document to", self.file)
+    logger.info("writing document to", self.file)
     self._document:writeDocument(self.file)
 end
 
@@ -157,6 +159,22 @@ function PdfDocument:close()
         self:writeDocument()
     end
     Document.close(self)
+end
+
+function PdfDocument:getProps()
+    local props = self._document:getMetadata()
+    if props.title == "" then
+        local startPos = util.lastIndexOf(self.file, "%/")
+        if startPos > 0  then
+            props.title = string.sub(self.file, startPos + 1, -5) --remove extension .pdf
+        else
+            props.title = string.sub(self.file, 0, -5)
+        end
+    end
+    props.authors = props.author
+    props.series = ""
+    props.language = ""
+    return props
 end
 
 function PdfDocument:getLinkFromPosition(pageno, pos)
@@ -181,6 +199,10 @@ end
 
 function PdfDocument:getCoverPageImage()
     return self.koptinterface:getCoverPageImage(self)
+end
+
+function PdfDocument:findText(pattern, origin, reverse, caseInsensitive, page)
+    return self.koptinterface:findText(self, pattern, origin, reverse, caseInsensitive, page)
 end
 
 function PdfDocument:renderPage(pageno, rect, zoom, rotation, gamma, render_mode)

@@ -1,14 +1,15 @@
 local Event = require("ui/event")
 local TimeVal = require("ui/timeval")
 local input = require("ffi/input")
-local util = require("ffi/util")
-local Math = require("optmath")
 local DEBUG = require("dbg")
-local ffi = require("ffi")
+local logger = require("logger")
 local _ = require("gettext")
 local Key = require("device/key")
 local GestureDetector = require("device/gesturedetector")
+local framebuffer = require("ffi/framebuffer")
 
+-- luacheck: push
+-- luacheck: ignore
 -- constants from <linux/input.h>
 local EV_SYN = 0
 local EV_KEY = 1
@@ -39,6 +40,21 @@ local ABS_MT_POSITION_X = 53
 local ABS_MT_POSITION_Y = 54
 local ABS_MT_TRACKING_ID = 57
 local ABS_MT_PRESSURE = 58
+
+-- For Kindle Oasis orientation events (ABS.code)
+-- the ABS code of orientation event will be adjusted to -24 from 24(ABS_PRESSURE)
+-- as ABS_PRESSURE is also used to detect touch input in KOBO devices.
+local ABS_OASIS_ORIENTATION = -24
+local DEVICE_ORIENTATION_PORTRAIT_LEFT = 15
+local DEVICE_ORIENTATION_PORTRAIT_RIGHT = 17
+local DEVICE_ORIENTATION_PORTRAIT = 19
+local DEVICE_ORIENTATION_PORTRAIT_ROTATED_LEFT = 16
+local DEVICE_ORIENTATION_PORTRAIT_ROTATED_RIGHT = 18
+local DEVICE_ORIENTATION_PORTRAIT_ROTATED = 20
+local DEVICE_ORIENTATION_LANDSCAPE = 21
+local DEVICE_ORIENTATION_LANDSCAPE_ROTATED = 22
+
+-- luacheck: pop
 
 --[[
 an interface to get input events
@@ -81,14 +97,14 @@ local Input = {
     },
 
     rotation_map = {
-        [0] = {},
-        [1] = { Up = "Right", Right = "Down", Down = "Left", Left = "Up" },
-        [2] = { Up = "Down", Right = "Left", Down = "Up", Left = "Right" },
-        [3] = { Up = "Left", Right = "Up", Down = "Right", Left = "Down" }
+        [framebuffer.ORIENTATION_PORTRAIT] = {},
+        [framebuffer.ORIENTATION_LANDSCAPE] = { Up = "Right", Right = "Down", Down = "Left", Left = "Up" },
+        [framebuffer.ORIENTATION_PORTRAIT_ROTATED] = { Up = "Down", Right = "Left", Down = "Up", Left = "Right", LPgFwd = "LPgBack", LPgBack = "LPgFwd", RPgFwd = "RPgBack", RPgBack = "RPgFwd" },
+        [framebuffer.ORIENTATION_LANDSCAPE_ROTATED] = { Up = "Left", Right = "Up", Down = "Right", Left = "Down" , LPgFwd = "LPgBack", LPgBack = "LPgFwd", RPgFwd = "RPgBack", RPgBack = "RPgFwd" }
     },
 
     timer_callbacks = {},
-    disable_double_tap = DGESDETECT_DISABLE_DOUBLE_TAP,
+    disable_double_tap = true,
 
     -- keyboard state:
     modifiers = {
@@ -108,7 +124,7 @@ local Input = {
 }
 
 function Input:new(o)
-    local o = o or {}
+    o = o or {}
     setmetatable(o, self)
     self.__index = self
     if o.init then o:init() end
@@ -130,10 +146,10 @@ function Input:init()
     -- user custom event map
     local ok, custom_event_map = pcall(dofile, "custom.event.map.lua")
     if ok then
-        DEBUG("custom event map", custom_event_map)
         for key, value in pairs(custom_event_map) do
             self.event_map[key] = value
         end
+        logger.info("loaded custom event map", custom_event_map)
     end
 end
 
@@ -143,8 +159,8 @@ wrapper for FFI input open
 Note that we adhere to the "." syntax here for compatibility.
 TODO: clean up separation FFI/this
 --]]
-function Input.open(device)
-    input.open(device)
+function Input.open(device, is_emu_events)
+    input.open(device, is_emu_events and 1 or 0)
 end
 
 --[[
@@ -153,14 +169,28 @@ and register them.
 --]]
 function Input:registerEventAdjustHook(hook, hook_params)
     local old = self.eventAdjustHook
-    self.eventAdjustHook = function(self, ev)
-        old(self, ev)
-        hook(self, ev, hook_params)
+    self.eventAdjustHook = function(this, ev)
+        old(this, ev)
+        hook(this, ev, hook_params)
     end
 end
+
+function Input:registerGestureAdjustHook(hook, hook_params)
+    local old = self.gestureAdjustHook
+    self.gestureAdjustHook = function(this, ges)
+        old(this, ges)
+        hook(this, ges, hook_params)
+    end
+end
+
 function Input:eventAdjustHook(ev)
     -- do nothing by default
 end
+
+function Input:gestureAdjustHook(ges)
+    -- do nothing by default
+end
+
 -- catalogue of predefined hooks:
 function Input:adjustTouchSwitchXY(ev)
     if ev.type == EV_ABS then
@@ -175,6 +205,7 @@ function Input:adjustTouchSwitchXY(ev)
         end
     end
 end
+
 function Input:adjustTouchScale(ev, by)
     if ev.type == EV_ABS then
         if ev.code == ABS_X or ev.code == ABS_MT_POSITION_X then
@@ -185,18 +216,21 @@ function Input:adjustTouchScale(ev, by)
         end
     end
 end
+
 function Input:adjustTouchMirrorX(ev, width)
     if ev.type == EV_ABS
     and (ev.code == ABS_X or ev.code == ABS_MT_POSITION_X) then
         ev.value = width - ev.value
     end
 end
+
 function Input:adjustTouchMirrorY(ev, height)
     if ev.type == EV_ABS
     and (ev.code == ABS_Y or ev.code == ABS_MT_POSITION_Y) then
         ev.value = height - ev.value
     end
 end
+
 function Input:adjustTouchTranslate(ev, by)
     if ev.type == EV_ABS then
         if ev.code == ABS_X or ev.code == ABS_MT_POSITION_X then
@@ -205,6 +239,12 @@ function Input:adjustTouchTranslate(ev, by)
         if ev.code == ABS_Y or ev.code == ABS_MT_POSITION_Y then
             ev.value = by.y + ev.value
         end
+    end
+end
+
+function Input:adjustKindleOasisOrientation(ev)
+    if ev.type == EV_ABS and ev.code == ABS_PRESSURE then
+        ev.code = ABS_OASIS_ORIENTATION
     end
 end
 
@@ -226,6 +266,10 @@ function Input:handleKeyBoardEv(ev)
         return
     end
 
+    if type(keycode) == "function" then
+        return keycode(ev)
+    end
+
     -- take device rotation into account
     if self.rotation_map[self.device.screen:getRotationMode()][keycode] then
         keycode = self.rotation_map[self.device.screen:getRotationMode()][keycode]
@@ -236,18 +280,20 @@ function Input:handleKeyBoardEv(ev)
         return keycode
     end
 
-    -- Kobo sleep
-    if keycode == "Power_SleepCover" then
-        if ev.value == EVENT_VALUE_KEY_PRESS then
-            return "Suspend"
+    if keycode == "Power" then
+        -- Kobo generates Power keycode only, we need to decide whether it's
+        -- power-on or power-off ourselves.
+        if self.device.screen_saver_mode then
+            if ev.value == EVENT_VALUE_KEY_RELEASE then
+                return "Resume"
+            end
         else
-            return "Resume"
+            if ev.value == EVENT_VALUE_KEY_PRESS then
+                return "PowerPress"
+            elseif ev.value == EVENT_VALUE_KEY_RELEASE then
+                return "PowerRelease"
+            end
         end
-    end
-
-    if ev.value == EVENT_VALUE_KEY_RELEASE
-    and (keycode == "Light" or keycode == "Power") then
-        return keycode
     end
 
     -- handle modifier keys
@@ -341,6 +387,7 @@ function Input:handleTouchEv(ev)
             local touch_ges = self.gesture_detector:feedEvent(self.MTSlots)
             self.MTSlots = {}
             if touch_ges then
+                self:gestureAdjustHook(touch_ges)
                 return Event:new("Gesture",
                     self.gesture_detector:adjustGesCoordinate(touch_ges)
                 )
@@ -405,11 +452,41 @@ function Input:handleTouchEvPhoenix(ev)
             local touch_ges = self.gesture_detector:feedEvent(self.MTSlots)
             self.MTSlots = {}
             if touch_ges then
+                self:gestureAdjustHook(touch_ges)
                 return Event:new("Gesture",
                     self.gesture_detector:adjustGesCoordinate(touch_ges)
                 )
             end
         end
+    end
+end
+
+function Input:handleOasisOrientationEv(ev)
+    local rotation_mode, screen_mode
+    if ev.value == DEVICE_ORIENTATION_PORTRAIT
+        or ev.value == DEVICE_ORIENTATION_PORTRAIT_LEFT
+        or ev.value == DEVICE_ORIENTATION_PORTRAIT_RIGHT then
+        rotation_mode = framebuffer.ORIENTATION_PORTRAIT
+        screen_mode = 'portrait'
+    elseif ev.value == DEVICE_ORIENTATION_LANDSCAPE then
+        rotation_mode = framebuffer.ORIENTATION_LANDSCAPE
+        screen_mode = 'landscape'
+    elseif ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED
+        or ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED_LEFT
+        or ev.value == DEVICE_ORIENTATION_PORTRAIT_ROTATED_RIGHT then
+        rotation_mode = framebuffer.ORIENTATION_PORTRAIT_ROTATED
+        screen_mode = 'portrait'
+    elseif ev.value == DEVICE_ORIENTATION_LANDSCAPE_ROTATED then
+        rotation_mode = framebuffer.ORIENTATION_LANDSCAPE_ROTATED
+        screen_mode = 'landscape'
+    end
+
+    local old_rotation_mode = self.device.screen:getRotationMode()
+    local old_screen_mode = self.device.screen:getScreenMode()
+    if rotation_mode ~= old_rotation_mode and screen_mode == old_screen_mode then
+        self.device.screen:setRotationMode(rotation_mode)
+        local UIManager = require("ui/uimanager")
+        UIManager:onRotation()
     end
 end
 
@@ -448,24 +525,31 @@ function Input:cleanAbsxy()
     self:setCurrentMtSlot("abs_y", nil)
 end
 
+function Input:isEvKeyPress(ev)
+    return ev.value == EVENT_VALUE_KEY_PRESS
+end
+
+function Input:isEvKeyRelease(ev)
+    return ev.value == EVENT_VALUE_KEY_RELEASE
+end
+
 
 -- main event handling:
 
-function Input:waitEvent(timeout_us, timeout_s)
+function Input:waitEvent(timeout_us)
     -- wrapper for input.waitForEvents that will retry for some cases
     local ok, ev
-    local wait_deadline = TimeVal:now() + TimeVal:new{
-            sec = timeout_s,
-            usec = timeout_us
-        }
     while true do
         if #self.timer_callbacks > 0 then
+            local wait_deadline = TimeVal:now() + TimeVal:new{
+                usec = timeout_us
+            }
             -- we don't block if there is any timer, set wait to 10us
             while #self.timer_callbacks > 0 do
                 ok, ev = pcall(input.waitForEvent, 100)
                 if ok then break end
                 local tv_now = TimeVal:now()
-                if ((not timeout_us and not timeout_s) or tv_now < wait_deadline) then
+                if (not timeout_us or tv_now < wait_deadline) then
                     -- check whether timer is up
                     if tv_now >= self.timer_callbacks[1].deadline then
                         local touch_ges = self.timer_callbacks[1].callback()
@@ -474,6 +558,7 @@ function Input:waitEvent(timeout_us, timeout_s)
                             -- Do we really need to clear all setTimeout after
                             -- decided a gesture? FIXME
                             self.timer_callbacks = {}
+                            self:gestureAdjustHook(touch_ges)
                             return Event:new("Gesture",
                                 self.gesture_detector:adjustGesCoordinate(touch_ges)
                             )
@@ -499,7 +584,7 @@ function Input:waitEvent(timeout_us, timeout_s)
             -- TODO: return an event that can be handled
             os.exit(0)
         end
-        --DEBUG("got error waiting for events:", ev)
+        logger.warn("got error waiting for events:", ev)
         if ev ~= "Waiting for input failed: 4\n" then
             -- we only abort if the error is not EINTR
             break
@@ -509,11 +594,14 @@ function Input:waitEvent(timeout_us, timeout_s)
     if ok and ev then
         if DEBUG.is_on and ev then
             DEBUG:logEv(ev)
+            logger.dbg("ev", ev)
         end
         self:eventAdjustHook(ev)
         if ev.type == EV_KEY then
-            DEBUG("key ev", ev)
+            logger.dbg("key ev", ev)
             return self:handleKeyBoardEv(ev)
+        elseif ev.type == EV_ABS and ev.code == ABS_OASIS_ORIENTATION then
+            return self:handleOasisOrientationEv(ev)
         elseif ev.type == EV_ABS or ev.type == EV_SYN then
             return self:handleTouchEv(ev)
         elseif ev.type == EV_MSC then

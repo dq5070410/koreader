@@ -3,6 +3,7 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
+local VerticalGroup = require("ui/widget/verticalgroup")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
 local RenderText = require("ui/rendertext")
@@ -10,7 +11,6 @@ local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
 local Device = require("device")
 local GestureRange = require("ui/gesturerange")
-local DEBUG = require("dbg")
 local Blitbuffer = require("ffi/blitbuffer")
 local _ = require("gettext")
 
@@ -25,48 +25,59 @@ function ToggleLabel:paintTo(bb, x, y)
 end
 
 local ToggleSwitch = InputContainer:new{
-    width = Screen:scaleByDPI(216),
-    height = Screen:scaleByDPI(30),
+    width = Screen:scaleBySize(216),
+    height = Screen:scaleBySize(30),
     bgcolor = Blitbuffer.COLOR_WHITE, -- unfoused item color
-    fgcolor = Blitbuffer.gray(0.5), -- focused item color
+    fgcolor = Blitbuffer.COLOR_GREY, -- focused item color
+    font_face = "cfont",
+    font_size = 16,
+    enabled = true,
+    row_count = 1,
 }
 
 function ToggleSwitch:init()
-    self.n_pos = #self.toggle
+    -- Item count per row
+    self.n_pos = math.ceil(#self.toggle / self.row_count)
     self.position = nil
-
-    local label_font_face = "cfont"
-    local label_font_size = 16
 
     self.toggle_frame = FrameContainer:new{
         background = Blitbuffer.COLOR_WHITE,
-        color = Blitbuffer.gray(0.5),
+        color = Blitbuffer.COLOR_GREY,
         radius = 7,
         bordersize = 1,
         padding = 2,
+        dim = not self.enabled,
     }
-    self.toggle_content = HorizontalGroup:new{}
 
-    for i=1,#self.toggle do
+    self.toggle_content = VerticalGroup:new{}
+    for i = 1, self.row_count do
+        table.insert(self.toggle_content, HorizontalGroup:new{})
+    end
+
+    local center_dimen = Geom:new{
+        w = self.width / self.n_pos,
+        h = self.height / self.row_count,
+    }
+    for i = 1, #self.toggle do
         local label = ToggleLabel:new{
             align = "center",
             text = self.toggle[i],
-            face = Font:getFace(label_font_face, label_font_size),
+            face = Font:getFace(self.font_face, self.font_size),
         }
         local content = CenterContainer:new{
-            dimen = Geom:new{w = self.width/self.n_pos, h = self.height},
+            dimen = center_dimen,
             label,
         }
         local button = FrameContainer:new{
             background = Blitbuffer.COLOR_WHITE,
-            color = Blitbuffer.gray(0.5),
+            color = Blitbuffer.COLOR_GREY,
             margin = 0,
             radius = 5,
             bordersize = 1,
             padding = 0,
             content,
         }
-        table.insert(self.toggle_content, button)
+        table.insert(self.toggle_content[math.ceil(i / self.n_pos)], button)
     end
 
     self.toggle_frame[1] = self.toggle_content
@@ -94,15 +105,19 @@ end
 
 function ToggleSwitch:update()
     local pos = self.position
-    for i=1,#self.toggle_content do
-        if pos == i then
-            self.toggle_content[i].color = self.fgcolor
-            self.toggle_content[i].background = self.fgcolor
-            self.toggle_content[i][1][1].fgcolor = Blitbuffer.COLOR_WHITE
-        else
-            self.toggle_content[i].color = self.bgcolor
-            self.toggle_content[i].background = self.bgcolor
-            self.toggle_content[i][1][1].fgcolor = Blitbuffer.COLOR_BLACK
+    for i = 1, #self.toggle_content do
+        local row = self.toggle_content[i]
+        for j = 1, #row do
+            local cell = row[j]
+            if pos == (i - 1) * self.n_pos + j then
+                cell.color = self.fgcolor
+                cell.background = self.fgcolor
+                cell[1][1].fgcolor = Blitbuffer.COLOR_WHITE
+            else
+                cell.color = self.bgcolor
+                cell.background = self.bgcolor
+                cell[1][1].fgcolor = Blitbuffer.COLOR_BLACK
+            end
         end
     end
 end
@@ -124,11 +139,15 @@ function ToggleSwitch:togglePosition(position)
     self:update()
 end
 
+function ToggleSwitch:calculatePosition(gev)
+    local x = (gev.pos.x - self.dimen.x) / self.dimen.w * self.n_pos
+    local y = (gev.pos.y - self.dimen.y) / self.dimen.h * self.row_count
+    return math.ceil(x) + math.floor(y) * self.n_pos
+end
+
 function ToggleSwitch:onTapSelect(arg, gev)
-    local position = math.ceil(
-        (gev.pos.x - self.dimen.x) / self.dimen.w * self.n_pos
-    )
-    --DEBUG("toggle position:", position)
+    if not self.enabled then return true end
+    local position = self:calculatePosition(gev)
     self:togglePosition(position)
     --[[
     if self.values then
@@ -145,14 +164,14 @@ function ToggleSwitch:onTapSelect(arg, gev)
     --]]
     self.config:onConfigChoose(self.values, self.name,
                     self.event, self.args, self.events, self.position)
-    UIManager:setDirty(self.config, "partial")
+    UIManager:setDirty(self.config, function()
+        return "ui", self.dimen
+    end)
     return true
 end
 
 function ToggleSwitch:onHoldSelect(arg, gev)
-    local position = math.ceil(
-        (gev.pos.x - self.dimen.x) / self.dimen.w * self.n_pos
-    )
+    local position = self:calculatePosition(gev)
     self.config:onMakeDefault(self.name, self.name_text,
                     self.values or self.args, self.toggle, position)
     return true

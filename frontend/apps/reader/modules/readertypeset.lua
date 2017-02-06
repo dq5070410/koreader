@@ -4,7 +4,7 @@ local lfs = require("libs/libkoreader-lfs")
 local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
 local Event = require("ui/event")
-local DEBUG = require("dbg")
+local T = require("ffi/util").template
 local _ = require("gettext")
 
 local ReaderTypeset = InputContainer:new{
@@ -18,21 +18,30 @@ function ReaderTypeset:init()
 end
 
 function ReaderTypeset:onReadSettings(config)
-    self.css = config:readSetting("css")
-    if self.css and self.css ~= "" then
+    self.css = config:readSetting("css") or G_reader_settings:readSetting("copt_css")
+    if self.css then
         self.ui.document:setStyleSheet(self.css)
     else
         self.ui.document:setStyleSheet(self.ui.document.default_css)
         self.css = self.ui.document.default_css
     end
 
-    -- default to enable embedded css
     self.embedded_css = config:readSetting("embedded_css")
-    if self.embedded_css == nil then self.embedded_css = true end
+    if self.embedded_css == nil then
+        -- default to enable embedded css
+        -- note that it's a bit confusing here:
+        -- global settins store 0/1, while document settings store false/true
+        -- we leave it that way for now to maintain backwards compatibility
+        local global = G_reader_settings:readSetting("copt_embedded_css")
+        self.embedded_css = (global == nil or global == 1) and true or false
+    end
     self.ui.document:setEmbeddedStyleSheet(self.embedded_css and 1 or 0)
 
     -- set page margins
-    self:onSetPageMargins(config:readSetting("copt_page_margins") or DCREREADER_CONFIG_MARGIN_SIZES_MEDIUM)
+    self:onSetPageMargins(
+        config:readSetting("copt_page_margins") or
+        G_reader_settings:readSetting("copt_page_margins") or
+        DCREREADER_CONFIG_MARGIN_SIZES_MEDIUM)
 
     -- default to enable floating punctuation
     -- the floating punctuation should not be boolean value for the following
@@ -55,40 +64,42 @@ function ReaderTypeset:onToggleEmbeddedStyleSheet(toggle)
 end
 
 function ReaderTypeset:genStyleSheetMenu()
+    local style_table = {}
     local file_list = {
         {
-            text = _("clear all external styles"),
-            callback = function()
-                self:setStyleSheet(nil)
-            end
+            text = _("Clear all external styles"),
+            css = ""
         },
         {
             text = _("Auto"),
-            callback = function()
-                self:setStyleSheet(self.ui.document.default_css)
-            end
+            css = self.ui.document.default_css
         },
     }
     for f in lfs.dir("./data") do
         if lfs.attributes("./data/"..f, "mode") == "file" and string.match(f, "%.css$") then
             table.insert(file_list, {
                 text = f,
-                callback = function()
-                    self:setStyleSheet("./data/"..f)
-                end
+                css = "./data/"..f
             })
         end
     end
-    return file_list
+    for i,file in ipairs(file_list) do
+        table.insert(style_table, {
+            text = file["text"],
+            callback = function()
+                self:setStyleSheet(file["css"])
+            end,
+            hold_callback = function()
+                self:makeDefaultStyleSheet(file["css"], file["text"])
+            end
+        })
+    end
+    return style_table
 end
 
 function ReaderTypeset:setStyleSheet(new_css)
     if new_css ~= self.css then
-        --DEBUG("setting css to ", new_css)
         self.css = new_css
-        if new_css == nil then
-            new_css = ""
-        end
         self.ui.document:setStyleSheet(new_css)
         self.ui:handleEvent(Event:new("UpdatePos"))
     end
@@ -149,18 +160,33 @@ end
 function ReaderTypeset:makeDefaultFloatingPunctuation()
     local toggler = self.floating_punctuation == 1 and _("On") or _("Off")
     UIManager:show(ConfirmBox:new{
-        text = _("Set default floating punctuation to ")..toggler.."?",
+        text = T(
+            _("Set default floating punctuation to %1?"),
+            toggler
+        ),
         ok_callback = function()
             G_reader_settings:saveSetting("floating_punctuation", self.floating_punctuation)
         end,
     })
 end
 
+function ReaderTypeset:makeDefaultStyleSheet(css, text)
+    text = text or css
+    if css then
+        UIManager:show(ConfirmBox:new{
+            text = T( _("Set default style to %1?"), text),
+            ok_callback = function()
+                G_reader_settings:saveSetting("copt_css", css)
+            end,
+        })
+    end
+end
+
 function ReaderTypeset:onSetPageMargins(margins)
-    local left = Screen:scaleByDPI(margins[1])
-    local top = Screen:scaleByDPI(margins[2])
-    local right = Screen:scaleByDPI(margins[3])
-    local bottom = Screen:scaleByDPI(margins[4])
+    local left = Screen:scaleBySize(margins[1])
+    local top = Screen:scaleBySize(margins[2])
+    local right = Screen:scaleBySize(margins[3])
+    local bottom = Screen:scaleBySize(margins[4])
     self.ui.document:setPageMargins(left, top, right, bottom)
     self.ui:handleEvent(Event:new("UpdatePos"))
     return true

@@ -10,11 +10,11 @@ local ImageWidget = require("ui/widget/imagewidget")
 local TextWidget = require("ui/widget/textwidget")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
-local Screen = require("device").screen
 local Device = require("device")
+local Screen = Device.screen
 local GestureRange = require("ui/gesturerange")
 local UIManager = require("ui/uimanager")
-local DEBUG = require("dbg")
+local logger = require("logger")
 local Blitbuffer = require("ffi/blitbuffer")
 
 local VirtualKey = InputContainer:new{
@@ -26,7 +26,7 @@ local VirtualKey = InputContainer:new{
     callback = nil,
 
     width = nil,
-    height = nil,
+    height = math.max(Screen:getWidth(), Screen:getHeight())*0.33,
     bordersize = 2,
     face = Font:getFace("infont", 22),
 }
@@ -47,7 +47,7 @@ function VirtualKey:init()
         self.callback = function () self.keyboard:addChar(self.key) end
     end
 
-    local label_widget = nil
+    local label_widget
     if self.icon then
         label_widget = ImageWidget:new{
             file = self.icon,
@@ -96,26 +96,15 @@ function VirtualKey:init()
 end
 
 function VirtualKey:update_keyboard()
-    UIManager.update_regions_func = function()
-        DEBUG("update key region", self[1].dimen)
-        return {self[1].dimen}
-    end
-    UIManager:setDirty(self.keyboard, "partial")
-end
-
-function VirtualKey:update_keyboard_inputbox()
-    local inputbox = self.keyboard.inputbox
-    UIManager.update_regions_func = function()
-        DEBUG("update keyboard and inputbox", self[1].dimen, inputbox.dimen)
-        return {self[1].dimen, inputbox.dimen}
-    end
-    UIManager:setDirty(inputbox, "partial")
-    UIManager:setDirty(self.keyboard, "partial")
+    UIManager:setDirty(self.keyboard, function()
+        logger.dbg("update key region", self[1].dimen)
+        return "ui", self[1].dimen
+    end)
 end
 
 function VirtualKey:onTapSelect()
     self[1].invert = true
-    self:update_keyboard_inputbox()
+    self:update_keyboard()
     if self.callback then
         self.callback()
     end
@@ -125,7 +114,7 @@ end
 
 function VirtualKey:onHoldSelect()
     self[1].invert = true
-    self:update_keyboard_inputbox()
+    self:update_keyboard()
     if self.hold_callback then
         self.hold_callback()
     end
@@ -151,79 +140,40 @@ local VirtualKeyboard = InputContainer:new{
     utf8mode = false,
     umlautmode = false,
 
-    width = 600,
-    height = 256,
+    width = Screen:scaleBySize(600),
+    height = Screen:scaleBySize(256),
     bordersize = 2,
     padding = 2,
-    key_padding = Screen:scaleByDPI(6),
+    key_padding = Screen:scaleBySize(6),
+}
+
+local lang_to_keyboard_layout = {
+    pl = "pl_keyboard",
+    pt_BR = "pt_keyboard",
 }
 
 function VirtualKeyboard:init()
-    self.KEYS = {
-        -- first row
-        {  --  1           2       3       4       5       6       7       8       9       10      11      12
-            { "Q",        "q",    "1",    "!",    "Я",    "я",    "1",    "!",    "Ä",    "ä",    "1",    "ª", },
-            { "W",        "w",    "2",    "?",    "Ж",    "ж",    "2",    "?",    "Ö",    "ö",    "2",    "º", },
-            { "E",        "e",    "3",    "|",    "Е",    "е",    "3",    "«",    "Ü",    "ü",    "3",    "¡", },
-            { "R",        "r",    "4",    "#",    "Р",    "р",    "4",    "»",    "ß",    "ß",    "4",    "¿", },
-            { "T",        "t",    "5",    "@",    "Т",    "т",    "5",    ":",    "À",    "à",    "5",    "¼", },
-            { "Y",        "y",    "6",    "‰",    "Ы",    "ы",    "6",    ";",    "Â",    "â",    "6",    "½", },
-            { "U",        "u",    "7",    "'",    "У",    "у",    "7",    "~",    "Æ",    "æ",    "7",    "¾", },
-            { "I",        "i",    "8",    "`",    "И",    "и",    "8",    "(",    "Ç",    "ç",    "8",    "©", },
-            { "O",        "o",    "9",    ":",    "О",    "о",    "9",    ")",    "È",    "è",    "9",    "®", },
-            { "P",        "p",    "0",    ";",    "П",    "п",    "0",    "=",    "É",    "é",    "0",    "™", },
-        },
-        -- second raw
-        {  --  1           2       3       4       5       6       7       8       9       10      11      12
-            { "A",        "a",    "+",    "…",    "А",    "а",    "Ш",    "ш",    "Ê",    "ê",    "Ş",    "ş", },
-            { "S",        "s",    "-",    "_",    "С",    "с",    "Ѕ",    "ѕ",    "Ë",    "ë",    "İ",    "ı", },
-            { "D",        "d",    "*",    "=",    "Д",    "д",    "Э",    "э",    "Î",    "î",    "Ğ",    "ğ", },
-            { "F",        "f",    "/",    "\\",   "Ф",    "ф",    "Ю",    "ю",    "Ï",    "ï",    "Ć",    "ć", },
-            { "G",        "g",    "%",    "„",    "Г",    "г",    "Ґ",    "ґ",    "Ô",    "ô",    "Č",    "č", },
-            { "H",        "h",    "^",    "“",    "Ч",    "ч",    "Ј",    "ј",    "Œ",    "œ",    "Đ",    "đ", },
-            { "J",        "j",    "<",    "”",    "Й",    "й",    "І",    "і",    "Ù",    "ù",    "Š",    "š", },
-            { "K",        "k",    "=",    "\"",   "К",    "к",    "Ќ",    "ќ",    "Û",    "û",    "Ž",    "ž", },
-            { "L",        "l",    ">",    "~",    "Л",    "л",    "Љ",    "љ",    "Ÿ",    "ÿ",    "Ő",    "ő", },
-        },
-        -- third raw
-        {  --  1           2       3       4       5       6       7       8       9       10      11      12
-            { label = "Shift",
-              icon = "resources/icons/appbar.arrow.shift.png",
-              width = 1.5
-            },
-            { "Z",        "z",    "(",    "$",    "З",    "з",    "Щ",    "щ",    "Á",    "á",    "Ű",    "ű", },
-            { "X",        "x",    ")",    "€",    "Х",    "х",    "№",    "@",    "É",    "é",    "Ø",    "ø", },
-            { "C",        "c",    "{",    "¥",    "Ц",    "ц",    "Џ",    "џ",    "Í",    "í",    "Þ",    "þ", },
-            { "V",        "v",    "}",    "£",    "В",    "в",    "Ў",    "ў",    "Ñ",    "ñ",    "Ý",    "ý", },
-            { "B",        "b",    "[",    "‚",    "Б",    "б",    "Ћ",    "ћ",    "Ó",    "ó",    "†",    "‡", },
-            { "N",        "n",    "]",    "‘",    "Н",    "н",    "Њ",    "њ",    "Ú",    "ú",    "–",    "—", },
-            { "M",        "m",    "&",    "’",    "М",    "м",    "Ї",    "ї",    "Ç",    "ç",    "…",    "¨", },
-            { label = "Backspace",
-              icon = "resources/icons/appbar.clear.reflect.horizontal.png",
-              width = 1.5
-            },
-        },
-        -- fourth raw
-        {
-            { "Sym",    "Sym",    "ABC",    "ABC",    "Sym",    "Sym",    "ABC",    "ABC",    "Sym",    "Sym",    "ABC",    "ABC",
-              width = 1.5},
-            { label = "IM",
-              icon = "resources/icons/appbar.globe.wire.png",
-            },
-            { "Äéß",        "Äéß",    "Äéß",    "Äéß",    "Äéß",    "Äéß",    "Äéß",    "Äéß",    "Äéß",    "Äéß",    "Äéß",    "Äéß", },
-            { label = "space",
-              " ",        " ",    " ",    " ",    " ",    " ",    " ",    " ",    " ",    " ",    " ",    " ",
-              width = 4.0},
-            { ",",        ".",    ".",    ",",    ",",    ".",    "Є",    "є",    ",",    ".",    ",",    ".", },
-            { label = "Enter",
-              "\n",        "\n",    "\n",    "\n",    "\n",    "\n",    "\n",    "\n",    "\n",    "\n",    "\n",    "\n",
-              icon = "resources/icons/appbar.arrow.enter.png",
-              width = 1.5,
-            },
-
-        }
-    }
+    local lang = G_reader_settings:readSetting("language")
+    local keyboard_layout = lang_to_keyboard_layout[lang] or "std"
+    self.KEYS = require("ui/data/keyboardlayouts/" .. keyboard_layout)
     self:initLayout(self.layout)
+end
+
+function VirtualKeyboard:_refresh()
+    -- TODO: Ideally, ui onShow & partial onClose
+    UIManager:setDirty(self, function()
+        return "partial", self[1][1].dimen
+    end)
+end
+
+function VirtualKeyboard:onShow()
+    self:_refresh()
+    return true
+end
+
+function VirtualKeyboard:onCloseWidget()
+    self:_refresh()
+    return true
 end
 
 function VirtualKeyboard:initLayout(layout)
@@ -283,7 +233,6 @@ function VirtualKeyboard:addKeys()
         end
     end
 
-    local size = vertical_group:getSize()
     local keyboard_frame = FrameContainer:new{
         margin = 0,
         bordersize = self.bordersize,
@@ -318,22 +267,21 @@ function VirtualKeyboard:setLayout(key)
         if self.utf8mode then self.umlautmode = false end
     end
     self:initLayout()
-    UIManager.update_regions_func = nil
-    UIManager:setDirty(self, "partial")
+    self:_refresh()
 end
 
 function VirtualKeyboard:addChar(key)
-    DEBUG("add char", key)
+    logger.dbg("add char", key)
     self.inputbox:addChar(key)
 end
 
 function VirtualKeyboard:delChar()
-    DEBUG("delete char")
+    logger.dbg("delete char")
     self.inputbox:delChar()
 end
 
 function VirtualKeyboard:clear()
-    DEBUG("clear input")
+    logger.dbg("clear input")
     self.inputbox:clear()
 end
 

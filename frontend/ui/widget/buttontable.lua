@@ -1,13 +1,15 @@
-local VerticalGroup = require("ui/widget/verticalgroup")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
+local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
+local FocusManager = require("ui/widget/focusmanager")
 local LineWidget = require("ui/widget/linewidget")
-local Button = require("ui/widget/button")
-local Screen = require("device").screen
-local Geom = require("ui/geometry")
 local Blitbuffer = require("ffi/blitbuffer")
+local Button = require("ui/widget/button")
+local Geom = require("ui/geometry")
+local Device = require("device")
+local Screen = Device.screen
 
-local ButtonTable = VerticalGroup:new{
+local ButtonTable = FocusManager:new{
     width = Screen:getWidth(),
     buttons = {
         {
@@ -15,8 +17,8 @@ local ButtonTable = VerticalGroup:new{
             {text="Cancel", enabled=false, callback=nil},
         },
     },
-    sep_width = Screen:scaleByDPI(1),
-    padding = Screen:scaleByDPI(2),
+    sep_width = Screen:scaleBySize(1),
+    padding = Screen:scaleBySize(2),
 
     zero_sep = false,
     button_font_face = "cfont",
@@ -24,20 +26,26 @@ local ButtonTable = VerticalGroup:new{
 }
 
 function ButtonTable:init()
-    --local vertical_group = VerticalGroup:new{}
+    self.buttons_layout = {}
+    self.container = VerticalGroup:new{ width = self.width }
+    table.insert(self, self.container)
     if self.zero_sep then
         self:addHorizontalSep()
     end
-    for i = 1, #self.buttons do
+    local row_cnt = #self.buttons
+    for i = 1, row_cnt do
+        self.buttons_layout[i] = {}
         local horizontal_group = HorizontalGroup:new{}
-        local line = self.buttons[i]
-        local sizer_space = self.sep_width * (#line - 1) + 2
-        for j = 1, #line do
+        local row = self.buttons[i]
+        local column_cnt = #row
+        local sizer_space = self.sep_width * (column_cnt - 1) + 2
+        for j = 1, column_cnt do
+            local btn_entry = row[j]
             local button = Button:new{
-                text = line[j].text,
-                enabled = line[j].enabled,
-                callback = line[j].callback,
-                width = (self.width - sizer_space)/#line,
+                text = btn_entry.text,
+                enabled = btn_entry.enabled,
+                callback = btn_entry.callback,
+                width = (self.width - sizer_space)/column_cnt,
                 bordersize = 0,
                 margin = 0,
                 padding = 0,
@@ -47,34 +55,48 @@ function ButtonTable:init()
             }
             local button_dim = button:getSize()
             local vertical_sep = LineWidget:new{
-                background = Blitbuffer.gray(0.5),
+                background = Blitbuffer.COLOR_GREY,
                 dimen = Geom:new{
                     w = self.sep_width,
                     h = button_dim.h,
                 }
             }
+            self.buttons_layout[i][j] = button
             table.insert(horizontal_group, button)
-            if j < #line then
+            if j < column_cnt then
                 table.insert(horizontal_group, vertical_sep)
             end
         end -- end for each button
-        table.insert(self, horizontal_group)
-        if i < #self.buttons then
+        table.insert(self.container, horizontal_group)
+        if i < row_cnt then
             self:addHorizontalSep()
         end
     end -- end for each button line
+    if Device:hasDPad() or Device:hasKeyboard() then
+        self.layout = self.buttons_layout
+        self.layout[1][1]:onFocus()
+        self.key_events.SelectByKeyPress = { {{"Press", "Enter"}} }
+    else
+        self.key_events = {}  -- deregister all key press event listeners
+    end
 end
 
 function ButtonTable:addHorizontalSep()
-    table.insert(self, VerticalSpan:new{ width = Screen:scaleByDPI(2) })
-    table.insert(self, LineWidget:new{
-        background = Blitbuffer.gray(0.5),
+    table.insert(self.container,
+                 VerticalSpan:new{ width = Screen:scaleBySize(2) })
+    table.insert(self.container, LineWidget:new{
+        background = Blitbuffer.COLOR_GREY,
         dimen = Geom:new{
             w = self.width,
             h = self.sep_width,
         }
     })
-    table.insert(self, VerticalSpan:new{ width = Screen:scaleByDPI(2) })
+    table.insert(self.container,
+                 VerticalSpan:new{ width = Screen:scaleBySize(2) })
+end
+
+function ButtonTable:onSelectByKeyPress()
+    self:getFocusItem().callback()
 end
 
 return ButtonTable

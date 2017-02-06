@@ -19,7 +19,7 @@ local function include_fold(template, start_tag, end_tag, fold_func, init_func)
     local start_tag_inc = start_tag..'include:'
 
     local start1, end1 = string.find(template, start_tag_inc, 1, true)
-    local start2 = nil
+    local start2
     local end2 = 0
 
     while start1 ~= nil do
@@ -74,6 +74,7 @@ end
 function slt2.get_dependency(template, start_tag, end_tag)
     return stable_uniq(include_fold(template, start_tag, end_tag, function(acc, v, name)
         if type(v) == 'string' then
+            return acc
         elseif type(v) == 'table' then
             if name ~= nil then
                 table.insert(acc, name)
@@ -101,7 +102,7 @@ function slt2.loadstring(template, start_tag, end_tag, tmpl_name)
     template = slt2.precompile(template, start_tag, end_tag)
 
     local start1, end1 = string.find(template, start_tag, 1, true)
-    local start2 = nil
+    local start2
     local end2 = 0
 
     local cEqual = string.byte('=', 1)

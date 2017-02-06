@@ -1,18 +1,14 @@
 local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local VerticalGroup = require("ui/widget/verticalgroup")
-local HorizontalGroup = require("ui/widget/horizontalgroup")
 local InputDialog = require("ui/widget/inputdialog")
 local InputText = require("ui/widget/inputtext")
 local UIManager = require("ui/uimanager")
 local Geom = require("ui/geometry")
 local Screen = require("device").screen
-local DEBUG = require("dbg")
 local _ = require("gettext")
-local util = require("ffi/util")
 local Blitbuffer = require("ffi/blitbuffer")
 
-local InfoMessage = require("ui/widget/infomessage")
 local input_field
 
 local MultiInputDialog = InputDialog:extend{
@@ -37,13 +33,14 @@ function MultiInputDialog:init()
         input_field[k] = InputText:new{
             text = field.text or "",
             hint = field.hint or "",
+            input_type = field.input_type or "string",
             face = self.input_face,
             width = self.width * 0.9,
             focused = k == 1 and true or false,
             scroll = false,
             parent = self,
         }
-        table.insert(VerticalGroupData,CenterContainer:new{
+        table.insert(VerticalGroupData, CenterContainer:new{
             dimen = Geom:new{
                 w = self.title_bar:getSize().w,
                 h = input_field[k]:getSize().h,
@@ -70,17 +67,16 @@ function MultiInputDialog:init()
         VerticalGroupData,
     }
 
-    self.input = input_field[1]
+    self._input_widget = input_field[1]
 
     self[1] = CenterContainer:new{
         dimen = Geom:new{
             w = Screen:getWidth(),
-            h = Screen:getHeight() - self.input:getKeyboardDimen().h,
+            h = Screen:getHeight() - self._input_widget:getKeyboardDimen().h,
         },
         self.dialog_frame,
     }
-    UIManager.repaint_all = true
-    UIManager.full_refresh = true
+    UIManager:setDirty("all", "full")
 end
 
 function MultiInputDialog:getFields()
@@ -93,13 +89,13 @@ end
 
 function MultiInputDialog:onSwitchFocus(inputbox)
     -- unfocus current inputbox
-    self.input:unfocus()
-    self.input:onCloseKeyboard()
+    self._input_widget:unfocus()
+    self._input_widget:onCloseKeyboard()
 
     -- focus new inputbox
-    self.input = inputbox
-    self.input:focus()
-    self.input:onShowKeyboard()
+    self._input_widget = inputbox
+    self._input_widget:focus()
+    self._input_widget:onShowKeyboard()
 
     UIManager:show(self)
 end

@@ -2,67 +2,33 @@ local Device = require("device")
 local Screen = Device.screen
 local Input = require("device").input
 local Event = require("ui/event")
+local Geom = require("ui/geometry")
 local util = require("ffi/util")
-local DEBUG = require("dbg")
+local dbg = require("dbg")
+local logger = require("logger")
 local _ = require("gettext")
 
--- cf. koreader-base/ffi-cdecl/include/mxcfb-kindle.h (UPDATE_MODE_* applies to Kobo, too)
-local UPDATE_MODE_PARTIAL       = 0x0
-local UPDATE_MODE_FULL          = 0x1
-
--- NOTE: Those have been confirmed on Kindle devices. Might be completely different on Kobo (except for AUTO)!
-local WAVEFORM_MODE_INIT        = 0x0    -- Screen goes to white (clears)
-local WAVEFORM_MODE_DU          = 0x1    -- Grey->white/grey->black
-local WAVEFORM_MODE_GC16        = 0x2    -- High fidelity (flashing)
-local WAVEFORM_MODE_GC4         = WAVEFORM_MODE_GC16 -- For compatibility
-local WAVEFORM_MODE_GC16_FAST   = 0x3    -- Medium fidelity
-local WAVEFORM_MODE_A2          = 0x4    -- Faster but even lower fidelity
-local WAVEFORM_MODE_GL16        = 0x5    -- High fidelity from white transition
-local WAVEFORM_MODE_GL16_FAST   = 0x6    -- Medium fidelity from white transition
--- Kindle FW >= 5.3
-local WAVEFORM_MODE_DU4         = 0x7    -- Medium fidelity 4 level of gray direct update
--- Kindle PW2
-local WAVEFORM_MODE_REAGL       = 0x8    -- Ghost compensation waveform
-local WAVEFORM_MODE_REAGLD      = 0x9    -- Ghost compensation waveform with dithering
--- Kindle Basic/Kindle Voyage
-local WAVEFORM_MODE_GL4         = 0xA    -- 2-bit from white transition
--- TODO: Use me in night mode on those devices?
-local WAVEFORM_MODE_GL16_INV    = 0xB    -- High fidelity for black transition
-
-local WAVEFORM_MODE_AUTO        = 0x101
-
--- Kobo's headers suck, so invent something to avoid magic numbers...
-local WAVEFORM_MODE_KOBO_REGAL  = 0x7
-
+local noop = function() end
+local MILLION = 1000000
 
 -- there is only one instance of this
 local UIManager = {
-    default_refresh_type = UPDATE_MODE_PARTIAL,
-    default_waveform_mode = WAVEFORM_MODE_GC16, -- high fidelity waveform
-    fast_waveform_mode = WAVEFORM_MODE_A2, -- FIXME: Is this OK on Kobo?
-    full_refresh_waveform_mode = WAVEFORM_MODE_GC16,
-    partial_refresh_waveform_mode = WAVEFORM_MODE_GC16,
-    wait_for_every_marker = false,
-    -- force to repaint all the widget is stack, will be reset to false
-    -- after each ui loop
-    repaint_all = false,
-    -- force to do full refresh, will be reset to false
-    -- after each ui loop
-    full_refresh = false,
-    -- force to do partial refresh, will be reset to false
-    -- after each ui loop
-    partial_refresh = false,
     -- trigger a full refresh when counter reaches FULL_REFRESH_COUNT
-    FULL_REFRESH_COUNT = G_reader_settings:readSetting("full_refresh_count") or DRCOUNTMAX,
+    FULL_REFRESH_COUNT =
+        G_reader_settings:readSetting("full_refresh_count") or DRCOUNTMAX,
     refresh_count = 0,
 
     event_handlers = nil,
 
     _running = true,
     _window_stack = {},
-    _execution_stack = {},
+    _task_queue = {},
+    _task_queue_dirty = false,
     _dirty = {},
     _zeromqs = {},
+    _refresh_stack = {},
+    _refresh_func_stack = {},
+    _entered_poweroff_stage = false,
 }
 
 function UIManager:init()
@@ -71,24 +37,73 @@ function UIManager:init()
             self:sendEvent(input_event)
         end,
         SaveState = function()
-            self:sendEvent(Event:new("FlushSettings"))
+            self:broadcastEvent(Event:new("FlushSettings"))
         end,
         Power = function(input_event)
             Device:onPowerEvent(input_event)
         end,
     }
+    self.poweroff_action = function()
+        self._entered_poweroff_stage = true;
+        Screen:setRotationMode(0)
+        require("ui/screensaver"):show("poweroff", _("Powered off"))
+        Screen:refreshFull()
+        UIManager:nextTick(function()
+            self:broadcastEvent(Event:new("Close"))
+            Device:powerOff()
+        end)
+    end
     if Device:isKobo() then
-        self.event_handlers["Suspend"] = function(input_event)
-            self:sendEvent(Event:new("FlushSettings"))
-            Device:onPowerEvent(input_event)
+        -- We do not want auto suspend procedure to waste battery during
+        -- suspend. So let's unschedule it when suspending, and restart it after
+        -- resume.
+        self:_initAutoSuspend()
+        self.event_handlers["Suspend"] = function()
+            self:_stopAutoSuspend()
+            Device:onPowerEvent("Suspend")
         end
-        self.event_handlers["Resume"] = function(input_event)
-            Device:onPowerEvent(input_event)
+        self.event_handlers["Resume"] = function()
+            Device:onPowerEvent("Resume")
             self:sendEvent(Event:new("Resume"))
+            self:_startAutoSuspend()
+        end
+        self.event_handlers["PowerPress"] = function()
+            UIManager:scheduleIn(2, self.poweroff_action)
+        end
+        self.event_handlers["PowerRelease"] = function()
+            if not self._entered_poweroff_stage then
+                UIManager:unschedule(self.poweroff_action)
+                self.event_handlers["Suspend"]()
+            end
+        end
+        if not G_reader_settings:readSetting("ignore_power_sleepcover") then
+            self.event_handlers["SleepCoverClosed"] = function()
+                Device.is_cover_closed = true
+                self.event_handlers["Suspend"]()
+            end
+            self.event_handlers["SleepCoverOpened"] = function()
+                Device.is_cover_closed = false
+                self.event_handlers["Resume"]()
+            end
+        else
+            -- Closing/opening the cover will still wake up the device, so we
+            -- need to put it back to sleep if we are in screen saver mode
+            self.event_handlers["SleepCoverClosed"] = function()
+                if Device.screen_saver_mode then
+                    self.event_handlers["Suspend"]()
+                end
+            end
+            self.event_handlers["SleepCoverOpened"] = self.event_handlers["SleepCoverClosed"]
         end
         self.event_handlers["Light"] = function()
             Device:getPowerDevice():toggleFrontlight()
         end
+        self.event_handlers["Charging"] = function()
+            if Device.screen_saver_mode then
+                self.event_handlers["Suspend"]()
+            end
+        end
+        self.event_handlers["NotCharging"] = self.event_handlers["Charging"]
         self.event_handlers["__default__"] = function(input_event)
             if Device.screen_saver_mode then
                 -- Suspension in Kobo can be interrupted by screen updates. We
@@ -99,26 +114,8 @@ function UIManager:init()
                 self:sendEvent(input_event)
             end
         end
-        if KOBO_LIGHT_ON_START and tonumber(KOBO_LIGHT_ON_START) > -1 then
-            Device:getPowerDevice():setIntensity( math.max( math.min(KOBO_LIGHT_ON_START,100) ,0) )
-        end
-        -- Emulate the stock reader's refresh behavior...
-        self.full_refresh_waveform_mode = WAVEFORM_MODE_GC16
-        -- Request REGAL waveform mode on devices that support it (Aura & H2O)
-        if Device.model == "Kobo_phoenix" or Device.model == "Kobo_dahlia" then
-            self.partial_refresh_waveform_mode = WAVEFORM_MODE_KOBO_REGAL
-            -- Since Kobo doesn't have MXCFB_WAIT_FOR_UPDATE_SUBMISSION, enabling this currently has no effect :).
-            self.wait_for_every_marker = true
-        else
-            -- See the note in the Kindle code path later, the stock reader might be using AUTO
-            self.partial_refresh_waveform_mode = WAVEFORM_MODE_GC16
-            self.wait_for_every_marker = false
-        end
-        -- Let the driver decide what to do with PARTIAL, regional updates...
-        self.default_waveform_mode = WAVEFORM_MODE_AUTO
     elseif Device:isKindle() then
         self.event_handlers["IntoSS"] = function()
-            self:sendEvent(Event:new("FlushSettings"))
             Device:intoScreenSaver()
         end
         self.event_handlers["OutOfSS"] = function()
@@ -132,41 +129,19 @@ function UIManager:init()
             Device:usbPlugOut()
             self:sendEvent(Event:new("NotCharging"))
         end
-        -- Emulate the stock reader's refresh behavior...
-        --[[
-            NOTE: For ref, on a Touch (debugPaint & a patched strace are your friend!):
-                UI: flash: GC16_FAST, non-flash: AUTO (prefers GC16_FAST)
-                Reader: When flash: if to/from img: GC16, else GC16_FAST; when non-flash: AUTO (seems to prefer GL16_FAST); Waiting for marker only on flash
-            On a PW2:
-                UI: flash: GC16_FAST, non-flash: AUTO (prefers GC16_FAST)
-                Reader: When flash: if to/from img: GC16, else GC16_FAST; when non-flash: REAGL (w/ UPDATE_MODE_FULL!); Always waits for marker
-                    Note that the bottom status bar region is refreshed separately, right after the screen, as a PARTIAL, AUTO (GC16_FAST) update, and it's this marker that's waited after...
-                    Non flash lasts longer (dual timeout: 14pgs / 7mins).
-        --]]
-        -- We don't really have an easy way to know if we're refreshing the UI, or a page, or if said page contains an image, so go with the highest fidelity option
-        -- We spend much more time in the reader than the UI, and our UI isn't very graphic anyway, so we'll follow the reader's behaviour above all
-        self.full_refresh_waveform_mode = WAVEFORM_MODE_GC16
-        -- Request REAGL waveform mode on devices that support it (PW2, KT2, KV) [FIXME: Is that actually true of the KT2?]
-        if Device.model == "KindlePaperWhite2" or Device.model == "KindleBasic" or Device.model == "KindleVoyage" then
-            self.partial_refresh_waveform_mode = WAVEFORM_MODE_REAGL
-            -- We need to wait for every update marker when using REAGL waveform modes. That mostly means we always use MXCFB_WAIT_FOR_UPDATE_SUBMISSION.
-            self.wait_for_every_marker = true
-        else
-            self.partial_refresh_waveform_mode = WAVEFORM_MODE_GL16_FAST
-            -- NOTE: Or we could go back to what KOReader did before fa55acc in koreader-base, which was also to use AUTO ;). I have *no* idea how the driver makes its choice though...
-            --self.partial_refresh_waveform_mode = WAVEFORM_MODE_AUTO
-            -- Only wait for update markers on FULL updates
-            self.wait_for_every_marker = false
-        end
-        -- Default to GC16_FAST (will be used for PARTIAL, regional updates)
-        self.default_waveform_mode = WAVEFORM_MODE_GC16_FAST
     end
 end
 
 -- register & show a widget
 -- modal widget should be always on the top
-function UIManager:show(widget, x, y)
-    DEBUG("show widget", widget.id)
+-- for refreshtype & refreshregion see description of setDirty()
+function UIManager:show(widget, refreshtype, refreshregion, x, y)
+    if not widget then
+        logger.dbg("widget not exist to be shown")
+        return
+    end
+    logger.dbg("show widget", widget.id or widget.name or "unknown")
+
     self._running = true
     local window = {x = x or 0, y = y or 0, widget = widget}
     -- put this window on top of the toppest non-modal window
@@ -179,30 +154,37 @@ function UIManager:show(widget, x, y)
         end
     end
     -- and schedule it to be painted
-    self:setDirty(widget)
+    self:setDirty(widget, refreshtype, refreshregion)
     -- tell the widget that it is shown now
     widget:handleEvent(Event:new("Show"))
     -- check if this widget disables double tap gesture
-    if widget.disable_double_tap then
+    if widget.disable_double_tap == false then
+        Input.disable_double_tap = false
+    else
         Input.disable_double_tap = true
     end
 end
 
 -- unregister a widget
-function UIManager:close(widget)
+-- for refreshtype & refreshregion see description of setDirty()
+function UIManager:close(widget, refreshtype, refreshregion)
     if not widget then
-        DEBUG("widget not exist to be closed")
+        logger.dbg("widget not exist to be closed")
         return
     end
-    DEBUG("close widget", widget.id)
-    Input.disable_double_tap = DGESDETECT_DISABLE_DOUBLE_TAP
+    logger.dbg("close widget", widget.id or widget.name)
     local dirty = false
+    -- first send close event to widget
+    widget:handleEvent(Event:new("CloseWidget"))
+    -- make it disabled by default and check any widget that enables it
+    Input.disable_double_tap = true
+    -- then remove all reference to that widget on stack and update
     for i = #self._window_stack, 1, -1 do
         if self._window_stack[i].widget == widget then
             table.remove(self._window_stack, i)
             dirty = true
-        elseif self._window_stack[i].widget.disable_double_tap then
-            Input.disable_double_tap = true
+        elseif self._window_stack[i].widget.disable_double_tap == false then
+            Input.disable_double_tap = false
         end
     end
     if dirty then
@@ -210,50 +192,135 @@ function UIManager:close(widget)
         for i = 1, #self._window_stack do
             self:setDirty(self._window_stack[i].widget)
         end
+        self:_refresh(refreshtype, refreshregion)
     end
 end
 
--- schedule an execution task
+-- schedule an execution task, task queue is in ascendant order
 function UIManager:schedule(time, action)
-    table.insert(self._execution_stack, { time = time, action = action })
+    local p, s, e = 1, 1, #self._task_queue
+    if e ~= 0 then
+        local us = time[1] * MILLION + time[2]
+        -- do a binary insert
+        repeat
+            p = math.floor(s + (e - s) / 2)
+            local ptime = self._task_queue[p].time
+            local ptus = ptime[1] * MILLION + ptime[2]
+            if us > ptus then
+                if s == e then
+                    p = e + 1
+                    break
+                elseif s + 1 == e then
+                    s = e
+                else
+                    s = p
+                end
+            elseif us < ptus then
+                e = p
+                if s == e then
+                    break
+                end
+            else
+                -- for fairness, it's better to make p+1 is strictly less than
+                -- p might want to revisit here in the future
+                break
+            end
+        until e < s
+    end
+    table.insert(self._task_queue, p, { time = time, action = action })
+    self._task_queue_dirty = true
 end
+dbg:guard(UIManager, 'schedule',
+    function(self, time, action)
+        assert(time[1] >= 0 and time[2] >= 0, "Only positive time allowed")
+        assert(action ~= nil)
+    end)
 
 -- schedule task in a certain amount of seconds (fractions allowed) from now
 function UIManager:scheduleIn(seconds, action)
     local when = { util.gettime() }
     local s = math.floor(seconds)
-    local usecs = (seconds - s) * 1000000
+    local usecs = (seconds - s) * MILLION
     when[1] = when[1] + s
     when[2] = when[2] + usecs
-    if when[2] > 1000000 then
+    if when[2] > MILLION then
         when[1] = when[1] + 1
-        when[2] = when[2] - 1000000
+        when[2] = when[2] - MILLION
     end
     self:schedule(when, action)
 end
+dbg:guard(UIManager, 'scheduleIn',
+    function(self, seconds, action)
+        assert(seconds >= 0, "Only positive seconds allowed")
+    end)
 
+function UIManager:nextTick(action)
+    return self:scheduleIn(0, action)
+end
+
+-- unschedule an execution task
+-- in order to unschedule anonymous functions, store a reference
+-- for example:
+-- self.anonymousFunction = function() self:regularFunction() end
+-- UIManager:scheduleIn(10, self.anonymousFunction)
+-- UIManager:unschedule(self.anonymousFunction)
 function UIManager:unschedule(action)
-    for i = #self._execution_stack, 1, -1 do
-        local task = self._execution_stack[i]
-        if task.action == action then
-            -- remove from table
-            table.remove(self._execution_stack, i)
+    for i = #self._task_queue, 1, -1 do
+        if self._task_queue[i].action == action then
+            table.remove(self._task_queue, i)
         end
     end
 end
+dbg:guard(UIManager, 'unschedule',
+    function(self, action) assert(action ~= nil) end)
 
--- register a widget to be repainted
-function UIManager:setDirty(widget, refresh_type)
-    -- "auto": request full refresh
-    -- "full": force full refresh
-    -- "partial": partial refresh
-    if not refresh_type then
-        refresh_type = "auto"
-    end
+--[[
+register a widget to be repainted and enqueue a refresh
+
+the second parameter (refreshtype) can either specify a refreshtype
+(optionally in combination with a refreshregion - which is suggested)
+or a function that returns refreshtype AND refreshregion and is called
+after painting the widget.
+
+E.g.:
+UIManager:setDirty(self.widget, "partial")
+UIManager:setDirty(self.widget, "partial", Geom:new{x=10,y=10,w=100,h=50})
+UIManager:setDirty(self.widget, function() return "ui", self.someelement.dimen end)
+--]]
+function UIManager:setDirty(widget, refreshtype, refreshregion)
     if widget then
-        self._dirty[widget] = refresh_type
+        if widget == "all" then
+            -- special case: set all top-level widgets as being "dirty".
+            for i = 1, #self._window_stack do
+                self._dirty[self._window_stack[i].widget] = true
+            end
+        else
+            self._dirty[widget] = true
+        end
+    end
+    -- handle refresh information
+    if type(refreshtype) == "function" then
+        -- callback, will be issued after painting
+        table.insert(self._refresh_func_stack, refreshtype)
+    else
+        -- otherwise, enqueue refresh
+        self:_refresh(refreshtype, refreshregion)
     end
 end
+dbg:guard(UIManager, 'setDirty',
+    nil,
+    function(self, widget, refreshtype, refreshregion)
+        if not widget or widget == "all" then return end
+        -- when debugging, we check if we get handed a valid widget,
+        -- which would be a dialog that was previously passed via show()
+        local found = false
+        for i = 1, #self._window_stack do
+            if self._window_stack[i].widget == widget then found = true end
+        end
+        if not found then
+            dbg:v("INFO: invalid widget for setDirty()", debug.traceback())
+        end
+    end)
 
 function UIManager:insertZMQ(zeromq)
     table.insert(self._zeromqs, zeromq)
@@ -271,7 +338,7 @@ end
 -- set full refresh rate for e-ink screen
 -- and make the refresh rate persistant in global reader settings
 function UIManager:setRefreshRate(rate)
-    DEBUG("set screen full refresh rate", rate)
+    logger.dbg("set screen full refresh rate", rate)
     self.FULL_REFRESH_COUNT = rate
     G_reader_settings:saveSetting("full_refresh_count", rate)
 end
@@ -283,72 +350,339 @@ end
 
 -- signal to quit
 function UIManager:quit()
-    DEBUG("quit uimanager")
+    logger.info("quiting uimanager")
+    self._task_queue_dirty = false
     self._running = false
+    self._run_forever = nil
     for i = #self._window_stack, 1, -1 do
         table.remove(self._window_stack, i)
     end
-    for i = #self._execution_stack, 1, -1 do
-        table.remove(self._execution_stack, i)
+    for i = #self._task_queue, 1, -1 do
+        table.remove(self._task_queue, i)
     end
     for i = #self._zeromqs, 1, -1 do
         self._zeromqs[i]:stop()
         table.remove(self._zeromqs, i)
     end
+    if self.looper then
+        self.looper:close()
+        self.looper = nil
+    end
 end
 
--- transmit an event to registered widgets
+-- transmit an event to an active widget
 function UIManager:sendEvent(event)
     if #self._window_stack == 0 then return end
+
+    local top_widget = self._window_stack[#self._window_stack]
     -- top level widget has first access to the event
-    if self._window_stack[#self._window_stack].widget:handleEvent(event) then
+    if top_widget.widget:handleEvent(event) then
         return
     end
-
-    -- if the event is not consumed, active widgets can access it
-    for _, widget in ipairs(self._window_stack) do
-        if widget.widget.is_always_active then
-            if widget.widget:handleEvent(event) then return end
+    if top_widget.widget.active_widgets then
+        for _, active_widget in ipairs(top_widget.widget.active_widgets) do
+            if active_widget:handleEvent(event) then return end
         end
-        if widget.widget.active_widgets then
-            for _, active_widget in ipairs(widget.widget.active_widgets) do
-                if active_widget:handleEvent(event) then return end
+    end
+
+    -- if the event is not consumed, active widgets (from top to bottom) can
+    -- access it. NOTE: _window_stack can shrink on close event
+    local checked_widgets = {top_widget}
+    for i = #self._window_stack, 1, -1 do
+        local widget = self._window_stack[i]
+        if checked_widgets[widget] == nil then
+            -- active widgets has precedence to handle this event
+            -- Note: ReaderUI currently only has one active_widget: readerscreenshot
+            if widget.widget.active_widgets then
+                checked_widgets[widget] = true
+                for _, active_widget in ipairs(widget.widget.active_widgets) do
+                    if active_widget:handleEvent(event) then return end
+                end
+            end
+            if widget.widget.is_always_active then
+                -- active widgets will handle this event
+                -- Note: is_always_active widgets currently are vitualkeyboard and
+                -- readerconfig
+                checked_widgets[widget] = true
+                if widget.widget:handleEvent(event) then return end
             end
         end
     end
 end
 
-function UIManager:checkTasks()
-    local now = { util.gettime() }
-
-    -- check if we have timed events in our queue and search next one
-    local wait_until = nil
-    local all_tasks_checked
-    repeat
-        all_tasks_checked = true
-        for i = #self._execution_stack, 1, -1 do
-            local task = self._execution_stack[i]
-            if not task.time
-                or task.time[1] < now[1]
-                or task.time[1] == now[1] and task.time[2] < now[2] then
-                -- task is pending to be executed right now. do it.
-                task.action()
-                -- and remove from table
-                table.remove(self._execution_stack, i)
-                -- start loop again, since new tasks might be on the
-                -- queue now
-                all_tasks_checked = false
-            elseif not wait_until
-                or wait_until[1] > task.time[1]
-                or wait_until[1] == task.time[1] and wait_until[2] > task.time[2] then
-                -- task is to be run in the future _and_ is scheduled
-                -- earlier than the tasks we looked at already
-                -- so adjust to the currently examined task instead.
-                wait_until = task.time
-            end
+-- transmit an event to all registered widgets
+function UIManager:broadcastEvent(event)
+    -- the widget's event handler might close widgets in which case
+    -- a simple iterator like ipairs would skip over some entries
+    local i = 1
+    while i <= #self._window_stack do
+        local prev_widget = self._window_stack[i].widget
+        self._window_stack[i].widget:handleEvent(event)
+        local top_widget = self._window_stack[i]
+        if top_widget == nil then
+            -- top widget closed itself
+            break
+        elseif top_widget.widget == prev_widget then
+            i = i + 1
         end
-    until all_tasks_checked
-    return wait_until
+    end
+end
+
+function UIManager:_checkTasks()
+    local now = { util.gettime() }
+    local now_us = now[1] * MILLION + now[2]
+    local wait_until = nil
+
+    -- task.action may schedule other events
+    self._task_queue_dirty = false
+    while true do
+        local nu_task = #self._task_queue
+        if nu_task == 0 then
+            -- all tasks checked
+            break
+        end
+        local task = self._task_queue[1]
+        local task_us = 0
+        if task.time ~= nil then
+            task_us = task.time[1] * MILLION + task.time[2]
+        end
+        if task_us <= now_us then
+            -- remove from table
+            table.remove(self._task_queue, 1)
+            -- task is pending to be executed right now. do it.
+            -- NOTE: be careful that task.action() might modify
+            -- _task_queue here. So need to avoid race condition
+            task.action()
+        else
+            -- queue is sorted in ascendant order, safe to assume all items
+            -- are future tasks for now
+            wait_until = task.time
+            break
+        end
+    end
+
+    return wait_until, now
+end
+
+-- precedence of refresh modes:
+local refresh_modes = { fast = 1, ui = 2, partial = 3, full = 4 }
+-- refresh methods in framebuffer implementation
+local refresh_methods = {
+    fast = "refreshFast",
+    ui = "refreshUI",
+    partial = "refreshPartial",
+    full = "refreshFull",
+}
+
+--[[
+refresh mode comparision
+
+will return the mode that takes precedence
+--]]
+local function update_mode(mode1, mode2)
+    if refresh_modes[mode1] > refresh_modes[mode2] then
+        return mode1
+    else
+        return mode2
+    end
+end
+
+--[[
+enqueue a refresh
+
+Widgets call this in their paintTo() method in order to notify
+UIManager that a certain part of the screen is to be refreshed.
+
+mode:   refresh mode ("full", "partial", "ui", "fast")
+region: Rect() that specifies the region to be updated
+        optional, update will affect whole screen if not specified.
+        Note that this should be the exception.
+--]]
+function UIManager:_refresh(mode, region)
+    if not mode then return end
+    if not region and mode == "full" then
+        self.refresh_count = 0 -- reset counter on explicit full refresh
+    end
+    -- special case: full screen partial update
+    -- will get promoted every self.FULL_REFRESH_COUNT updates
+    -- since _refresh can be called mutiple times via setDirty called in
+    -- different widget before a real screen repaint, we should make sure
+    -- refresh_count is incremented by only once at most for each repaint
+    if not region and mode == "partial" and not self.refresh_counted then
+        self.refresh_count = (self.refresh_count + 1) % self.FULL_REFRESH_COUNT
+        if self.refresh_count == self.FULL_REFRESH_COUNT - 1 then
+            logger.dbg("promote refresh to full refresh")
+            mode = "full"
+        end
+        self.refresh_counted = true
+    end
+
+    -- if no region is specified, define default region
+    region = region or Geom:new{w=Screen:getWidth(), h=Screen:getHeight()}
+
+    for i = 1, #self._refresh_stack do
+        -- check for collision with updates that are already enqueued
+        if region:intersectWith(self._refresh_stack[i].region) then
+            -- combine both refreshes' regions
+            local combined = region:combine(self._refresh_stack[i].region)
+            -- update the mode, if needed
+            mode = update_mode(mode, self._refresh_stack[i].mode)
+            -- remove colliding update
+            table.remove(self._refresh_stack, i)
+            -- and try again with combined data
+            return self:_refresh(mode, combined)
+        end
+    end
+    -- if we hit no (more) collides, enqueue the update
+    table.insert(self._refresh_stack, {mode = mode, region = region})
+end
+
+-- repaint dirty widgets
+function UIManager:_repaint()
+    -- flag in which we will record if we did any repaints at all
+    -- will trigger a refresh if set.
+    local dirty = false
+
+    for _, widget in ipairs(self._window_stack) do
+        -- paint if current widget or any widget underneath is dirty
+        if dirty or self._dirty[widget.widget] then
+            -- pass hint to widget that we got when setting widget dirty
+            -- the widget can use this to decide which parts should be refreshed
+            widget.widget:paintTo(Screen.bb, widget.x, widget.y, self._dirty[widget.widget])
+
+            -- and remove from list after painting
+            self._dirty[widget.widget] = nil
+
+            -- trigger repaint
+            dirty = true
+        end
+    end
+
+    -- execute pending refresh functions
+    for _, refreshfunc in ipairs(self._refresh_func_stack) do
+        local refreshtype, region = refreshfunc()
+        if refreshtype then self:_refresh(refreshtype, region) end
+    end
+    self._refresh_func_stack = {}
+
+    -- we should have at least one refresh if we did repaint.  If we don't, we
+    -- add one now and log a warning if we are debugging
+    if dirty and #self._refresh_stack == 0 then
+        logger.warn("no refresh got enqueued. Will do a partial full screen refresh, which might be inefficient")
+        self:_refresh("partial")
+    end
+
+    -- execute refreshes:
+    for _, refresh in ipairs(self._refresh_stack) do
+        dbg:v("triggering refresh", refresh)
+        Screen[refresh_methods[refresh.mode]](Screen,
+            refresh.region.x - 1, refresh.region.y - 1,
+            refresh.region.w + 2, refresh.region.h + 2)
+    end
+    self._refresh_stack = {}
+    self.refresh_counted = false
+end
+
+function UIManager:forceRePaint()
+    self:_repaint()
+end
+
+function UIManager:setInputTimeout(timeout)
+    self.INPUT_TIMEOUT = timeout or 200*1000
+end
+
+function UIManager:resetInputTimeout()
+    self.INPUT_TIMEOUT = nil
+end
+
+function UIManager:handleInput()
+    local wait_until, now
+    -- run this in a loop, so that paints can trigger events
+    -- that will be honored when calculating the time to wait
+    -- for input events:
+    repeat
+        wait_until, now = self:_checkTasks()
+        --dbg("---------------------------------------------------")
+        --dbg("exec stack", self._task_queue)
+        --dbg("window stack", self._window_stack)
+        --dbg("dirty stack", self._dirty)
+        --dbg("---------------------------------------------------")
+
+        -- stop when we have no window to show
+        if #self._window_stack == 0 and not self._run_forever then
+            logger.info("no dialog left to show")
+            self:quit()
+            return nil
+        end
+
+        self:_repaint()
+    until not self._task_queue_dirty
+
+    -- wait for next event
+    -- note that we will skip that if we have tasks that are ready to run
+    local input_event = nil
+    if not wait_until then
+        if #self._zeromqs > 0 then
+            -- pending message queue, wait 100ms for input
+            input_event = Input:waitEvent(1000*100)
+            if not input_event or input_event.handler == "onInputError" then
+                for _, zeromq in ipairs(self._zeromqs) do
+                    input_event = zeromq:waitEvent()
+                    if input_event then break end
+                end
+            end
+        else
+            -- no pending task, wait without timeout
+            input_event = Input:waitEvent(self.INPUT_TIMEOUT)
+        end
+    elseif wait_until[1] > now[1]
+    or wait_until[1] == now[1] and wait_until[2] > now[2] then
+        -- wait until next task is pending
+        local wait_us = (wait_until[1] - now[1]) * MILLION
+                        + (wait_until[2] - now[2])
+        input_event = Input:waitEvent(wait_us)
+    end
+
+    -- delegate input_event to handler
+    if input_event then
+        self:_resetAutoSuspendTimer()
+        local handler = self.event_handlers[input_event]
+        if handler then
+            handler(input_event)
+        else
+            self.event_handlers["__default__"](input_event)
+        end
+    end
+
+    if self.looper then
+        logger.info("handle input in turbo I/O looper")
+        self.looper:add_callback(function()
+            -- FIXME: force close looper when there is unhandled error,
+            -- otherwise the looper will hang. Any better solution?
+            xpcall(function() self:handleInput() end, function(err)
+                io.stderr:write(err .. "\n")
+                io.stderr:write(debug.traceback() .. "\n")
+                io.stderr:flush()
+                self.looper:close()
+                os.exit(1)
+            end)
+        end)
+    end
+end
+
+
+function UIManager:onRotation()
+    self:setDirty('all', 'full')
+    self:forceRePaint()
+end
+
+function UIManager:initLooper()
+    if DUSE_TURBO_LIB and not self.looper then
+        TURBO_SSL = true -- luacheck: ignore
+        __TURBO_USE_LUASOCKET__ = true -- luacheck: ignore
+        local turbo = require("turbo")
+        self.looper = turbo.ioloop.instance()
+    end
 end
 
 -- this is the main loop of the UI controller
@@ -356,209 +690,77 @@ end
 -- them to dialogs
 function UIManager:run()
     self._running = true
-    while self._running do
-        local now = { util.gettime() }
-        local wait_until = self:checkTasks()
-
-        --DEBUG("---------------------------------------------------")
-        --DEBUG("exec stack", self._execution_stack)
-        --DEBUG("window stack", self._window_stack)
-        --DEBUG("dirty stack", self._dirty)
-        --DEBUG("---------------------------------------------------")
-
-        -- stop when we have no window to show
-        if #self._window_stack == 0 then
-            DEBUG("no dialog left to show")
-            self:quit()
-            return nil
+    self:initLooper()
+    -- currently there is no Turbo support for Windows
+    -- use our own main loop
+    if not self.looper then
+        while self._running do
+            self:handleInput()
         end
-
-        -- repaint dirty widgets
-        local dirty = false
-        local request_full_refresh = false
-        local force_full_refresh = false
-        local force_partial_refresh = false
-        local force_fast_refresh = false
-        for _, widget in ipairs(self._window_stack) do
-            -- paint if repaint_all is request
-            -- paint also if current widget or any widget underneath is dirty
-            if self.repaint_all or dirty or self._dirty[widget.widget] then
-                widget.widget:paintTo(Screen.bb, widget.x, widget.y)
-
-                if self._dirty[widget.widget] == "auto" then
-                    request_full_refresh = true
-                end
-                if self._dirty[widget.widget] == "full" then
-                    force_full_refresh = true
-                end
-                if self._dirty[widget.widget] == "partial" then
-                    force_partial_refresh = true
-                end
-                if self._dirty[widget.widget] == "fast" then
-                    force_fast_refresh = true
-                end
-                -- and remove from list after painting
-                self._dirty[widget.widget] = nil
-                -- trigger repaint
-                dirty = true
-            end
-        end
-
-        if self.full_refresh then
-            dirty = true
-            force_full_refresh = true
-        end
-
-        if self.partial_refresh then
-            dirty = true
-            force_partial_refresh = true
-        end
-
-        self.repaint_all = false
-        self.full_refresh = false
-        self.partial_refresh = false
-
-        local refresh_type = self.default_refresh_type
-        local waveform_mode = self.default_waveform_mode
-        local wait_for_marker = self.wait_for_every_marker
-        if dirty then
-            if force_partial_refresh or force_fast_refresh then
-                refresh_type = UPDATE_MODE_PARTIAL
-            elseif force_full_refresh or self.refresh_count == self.FULL_REFRESH_COUNT - 1 then
-                refresh_type = UPDATE_MODE_FULL
-            end
-            -- Handle the waveform mode selection...
-            if refresh_type == UPDATE_MODE_FULL then
-                waveform_mode = self.full_refresh_waveform_mode
-            else
-                waveform_mode = self.partial_refresh_waveform_mode
-            end
-            if force_fast_refresh then
-                waveform_mode = self.fast_waveform_mode
-            end
-            -- If the device is REAGL-aware, and we're doing a reader refresh (i.e., PARTIAL, but not regional), apply some trickery to match the stock reader's behavior (REAGL updates are always FULL, but there's no black flash)
-            if not self.update_regions_func and refresh_type == UPDATE_MODE_PARTIAL and (waveform_mode == WAVEFORM_MODE_REAGL or waveform_mode == WAVEFORM_MODE_KOBO_REGAL) then
-                refresh_type = UPDATE_MODE_FULL
-            end
-            -- If we truly asked for a PARTIAL, regional update, it's likely for an UI element, so fall back to the default waveform mode, which is tailored per-device to hopefully be more appropriate than the one we use in the reader
-            if self.update_regions_func and refresh_type == UPDATE_MODE_PARTIAL and not force_fast_refresh then
-                -- NOTE: Using default_waveform_mode might seem counter-intuitive when we have partial_refresh_waveform_mode, but partial_refresh_waveform_mode is mostly there as a means to flag REAGL-aware devices ;).
-                -- Here, we're actually interested in handling regional updates (which happen to be PARTIAL by definition), and not 'PARTIAL' updates that actually refresh the whole screen.
-                waveform_mode = self.default_waveform_mode
-            end
-            if self.update_regions_func then
-                local update_regions = self.update_regions_func()
-                for _, update_region in ipairs(update_regions) do
-                    -- in some rare cases update region has 1 pixel offset
-                    Screen:refresh(refresh_type, waveform_mode, wait_for_marker,
-                                   update_region.x-1, update_region.y-1,
-                                   update_region.w+2, update_region.h+2)
-                end
-            else
-                Screen:refresh(refresh_type, waveform_mode, wait_for_marker)
-            end
-            -- REAGL refreshes are always FULL (but without a black flash), but we want to keep our black flash timeout working, so don't reset the counter on FULL REAGL refreshes...
-            if refresh_type == UPDATE_MODE_FULL and waveform_mode ~= WAVEFORM_MODE_REAGL and waveform_mode ~= WAVEFORM_MODE_KOBO_REGAL then
-                self.refresh_count = 0
-            elseif not force_partial_refresh and not force_full_refresh then
-                self.refresh_count = (self.refresh_count + 1)%self.FULL_REFRESH_COUNT
-            end
-            self.update_regions_func = nil
-        end
-
-        self:checkTasks()
-
-        -- wait for next event
-        -- note that we will skip that if in the meantime we have tasks that are ready to run
-        local input_event = nil
-        if not wait_until then
-            if #self._zeromqs > 0 then
-                -- pending message queue, wait 100ms for input
-                input_event = Input:waitEvent(1000*100)
-                if not input_event or input_event.handler == "onInputError" then
-                    for _, zeromq in ipairs(self._zeromqs) do
-                        input_event = zeromq:waitEvent()
-                        if input_event then break end
-                    end
-                end
-            else
-                -- no pending task, wait endlessly
-                input_event = Input:waitEvent()
-            end
-        elseif wait_until[1] > now[1]
-        or wait_until[1] == now[1] and wait_until[2] > now[2] then
-            local wait_for = { s = wait_until[1] - now[1], us = wait_until[2] - now[2] }
-            if wait_for.us < 0 then
-                wait_for.s = wait_for.s - 1
-                wait_for.us = 1000000 + wait_for.us
-            end
-            -- wait until next task is pending
-            input_event = Input:waitEvent(wait_for.us, wait_for.s)
-        end
-
-        -- delegate input_event to handler
-        if input_event then
-            local handler = self.event_handlers[input_event]
-            if handler then
-                handler(input_event)
-            else
-                self.event_handlers["__default__"](input_event)
-            end
-        end
+    else
+        self.looper:add_callback(function() self:handleInput() end)
+        self.looper:start()
     end
 end
 
-function UIManager:getRefreshMenuTable()
-    local function custom_1() return G_reader_settings:readSetting("refresh_rate_1") or 12 end
-    local function custom_2() return G_reader_settings:readSetting("refresh_rate_2") or 22 end
-    local function custom_3() return G_reader_settings:readSetting("refresh_rate_3") or 99 end
-    local function custom_input(name)
-        return {
-            title = _("Input page number for a full refresh"),
-            type = "number",
-            hint = "(1 - 99)",
-            callback = function(input)
-                local rate = tonumber(input)
-                G_reader_settings:saveSetting(name, rate)
-                UIManager:setRefreshRate(rate)
-            end,
-        }
-    end
-    return {
-        text = _("E-ink full refresh rate"),
-        sub_item_table = {
-            {
-                text = _("Every page"),
-                checked_func = function() return UIManager:getRefreshRate() == 1 end,
-                callback = function() UIManager:setRefreshRate(1) end,
-            },
-            {
-                text = _("Every 6 pages"),
-                checked_func = function() return UIManager:getRefreshRate() == 6 end,
-                callback = function() UIManager:setRefreshRate(6) end,
-            },
-            {
-                text_func = function() return _("Custom ") .. "1: " .. custom_1() .. _(" pages") end,
-                checked_func = function() return UIManager:getRefreshRate() == custom_1() end,
-                callback = function() UIManager:setRefreshRate(custom_1()) end,
-                hold_input = custom_input("refresh_rate_1")
-            },
-            {
-                text_func = function() return _("Custom ") .. "2: " .. custom_2() .. _(" pages") end,
-                checked_func = function() return UIManager:getRefreshRate() == custom_2() end,
-                callback = function() UIManager:setRefreshRate(custom_2()) end,
-                hold_input = custom_input("refresh_rate_2")
-            },
-            {
-                text_func = function() return _("Custom ") .. "3: " .. custom_3() .. _(" pages") end,
-                checked_func = function() return UIManager:getRefreshRate() == custom_3() end,
-                callback = function() UIManager:setRefreshRate(custom_3()) end,
-                hold_input = custom_input("refresh_rate_3")
-            },
-        }
-    }
+-- run uimanager forever for testing purpose
+function UIManager:runForever()
+    self._run_forever = true
+    self:run()
 end
+
+-- Kobo does not have an auto suspend function, so we implement it ourselves.
+function UIManager:_initAutoSuspend()
+    local function isAutoSuspendEnabled()
+        return Device:isKobo() and self.auto_suspend_sec > 0
+    end
+
+    local sec = G_reader_settings:readSetting("auto_suspend_timeout_seconds")
+    if sec then
+        self.auto_suspend_sec = sec
+    else
+        -- default setting is 60 minutes
+        self.auto_suspend_sec = 60 * 60
+    end
+
+    if isAutoSuspendEnabled() then
+        self.auto_suspend_action = function()
+            local now = util.gettime()
+            -- Do not repeat auto suspend procedure after suspend.
+            if self.last_action_sec + self.auto_suspend_sec <= now then
+                Device:onPowerEvent("Suspend")
+            else
+                self:scheduleIn(
+                    self.last_action_sec + self.auto_suspend_sec - now,
+                    self.auto_suspend_action)
+            end
+        end
+
+        function UIManager:_startAutoSuspend()
+            self.last_action_sec = util.gettime()
+            self:nextTick(self.auto_suspend_action)
+        end
+        dbg:guard(UIManager, '_startAutoSuspend',
+            function()
+                assert(isAutoSuspendEnabled())
+            end)
+
+        function UIManager:_stopAutoSuspend()
+            self:unschedule(self.auto_suspend_action)
+        end
+
+        function UIManager:_resetAutoSuspendTimer()
+            self.last_action_sec = util.gettime()
+        end
+
+        self:_startAutoSuspend()
+    else
+        self._startAutoSuspend = noop
+        self._stopAutoSuspend = noop
+    end
+end
+
+UIManager._resetAutoSuspendTimer = noop
 
 UIManager:init()
 return UIManager
-

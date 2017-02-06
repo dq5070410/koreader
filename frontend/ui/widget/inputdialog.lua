@@ -1,3 +1,43 @@
+--[[--
+Widget for taking user input.
+
+Example:
+
+    local _ = require("gettext")
+    local UIManager = require("ui/uimanager")
+    local sample_input
+    sample_input = InputDialog:new{
+        title = _("Dialog title"),
+        input = "default value",
+        input_hint = "hint text",
+        input_type = "string",
+        -- text_type = "password",
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    callback = function()
+                        UIManager:close(sample_input)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    -- button with is_enter_default set to true will be
+                    -- triggered after user press the enter key from keyboard
+                    is_enter_default = true,
+                    callback = function()
+                        print('Got user input as raw text:', sample_input:getInputText())
+                        print('Got user input as value:', sample_input:getInputValue())
+                    end,
+                },
+            }
+        },
+    }
+    sample_input:onShowKeyboard()
+    UIManager:show(sample_input)
+
+]]
+
 local InputContainer = require("ui/widget/container/inputcontainer")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
@@ -24,17 +64,21 @@ local InputDialog = InputContainer:new{
     width = nil,
     height = nil,
 
+    text_width = nil,
+    text_height = nil,
+
     title_face = Font:getFace("tfont", 22),
     input_face = Font:getFace("cfont", 20),
 
-    title_padding = Screen:scaleByDPI(5),
-    title_margin = Screen:scaleByDPI(2),
-    input_padding = Screen:scaleByDPI(10),
-    input_margin = Screen:scaleByDPI(10),
-    button_padding = Screen:scaleByDPI(14),
+    title_padding = Screen:scaleBySize(5),
+    title_margin = Screen:scaleBySize(2),
+    input_padding = Screen:scaleBySize(10),
+    input_margin = Screen:scaleBySize(10),
+    button_padding = Screen:scaleBySize(14),
 }
 
 function InputDialog:init()
+    self.width = self.width or Screen:getWidth() * 0.8
     local title_width = RenderText:sizeUtf8Text(0, self.width,
             self.title_face, self.title, true).x
     if title_width > self.width then
@@ -54,13 +98,25 @@ function InputDialog:init()
             width = self.width,
         }
     }
-    self.input = InputText:new{
+
+    self._input_widget = InputText:new{
         text = self.input,
         hint = self.input_hint,
         face = self.input_face,
-        width = self.width * 0.9,
+        width = self.text_width or self.width * 0.9,
+        height = self.text_height or nil,
         input_type = self.input_type,
-        enter_callback = self.enter_callback,
+        text_type = self.text_type,
+        enter_callback = self.enter_callback or function()
+            for _,btn_row in ipairs(self.buttons) do
+                for _,btn in ipairs(btn_row) do
+                    if btn.is_enter_default then
+                        btn.callback()
+                        return
+                    end
+                end
+            end
+        end,
         scroll = false,
         parent = self,
     }
@@ -73,10 +129,9 @@ function InputDialog:init()
         show_parent = self,
     }
     self.title_bar = LineWidget:new{
-        --background = Blitbuffer.gray(0.5),
         dimen = Geom:new{
             w = self.button_table:getSize().w + self.button_padding,
-            h = Screen:scaleByDPI(2),
+            h = Screen:scaleBySize(2),
         }
     }
 
@@ -94,9 +149,9 @@ function InputDialog:init()
             CenterContainer:new{
                 dimen = Geom:new{
                     w = self.title_bar:getSize().w,
-                    h = self.input:getSize().h,
+                    h = self._input_widget:getSize().h,
                 },
-                self.input,
+                self._input_widget,
             },
             -- buttons
             CenterContainer:new{
@@ -112,24 +167,48 @@ function InputDialog:init()
     self[1] = CenterContainer:new{
         dimen = Geom:new{
             w = Screen:getWidth(),
-            h = Screen:getHeight() - self.input:getKeyboardDimen().h,
+            h = Screen:getHeight() - self._input_widget:getKeyboardDimen().h,
         },
         self.dialog_frame,
     }
-    UIManager.repaint_all = true
-    UIManager.full_refresh = true
-end
-
-function InputDialog:onShowKeyboard()
-    self.input:onShowKeyboard()
 end
 
 function InputDialog:getInputText()
-    return self.input:getText()
+    return self._input_widget:getText()
+end
+
+function InputDialog:getInputValue()
+    local text = self:getInputText()
+    if self.input_type == "number" then
+        return tonumber(text)
+    else
+        return text
+    end
+end
+
+function InputDialog:setInputText(text)
+    self._input_widget:setText(text)
+end
+
+function InputDialog:onShow()
+    UIManager:setDirty(self, function()
+        return "ui", self.dialog_frame.dimen
+    end)
+end
+
+function InputDialog:onCloseWidget()
+    self:onClose()
+    UIManager:setDirty(nil, function()
+        return "partial", self.dialog_frame.dimen
+    end)
+end
+
+function InputDialog:onShowKeyboard()
+    self._input_widget:onShowKeyboard()
 end
 
 function InputDialog:onClose()
-    self.input:onCloseKeyboard()
+    self._input_widget:onCloseKeyboard()
 end
 
 return InputDialog

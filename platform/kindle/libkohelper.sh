@@ -15,12 +15,33 @@ fi
 # We need to get the proper constants for our model...
 kmodel="$(cut -c3-4 /proc/usid)"
 case "${kmodel}" in
+	"13" | "54" | "2A" | "4F" | "52" | "53" )
+		# Voyage...
+		SCREEN_X_RES=1088	# NOTE: Yes, 1088, not 1072 or 1080...
+		SCREEN_Y_RES=1448
+		EIPS_X_RES=16
+		EIPS_Y_RES=24		# Manually mesured, should be accurate.
+	;;
 	"24" | "1B" | "1D" | "1F" | "1C" | "20" | "D4" | "5A" | "D5" | "D6" | "D7" | "D8" | "F2" | "17" | "60" | "F4" | "F9" | "62" | "61" | "5F" )
 		# PaperWhite...
 		SCREEN_X_RES=768	# NOTE: Yes, 768, not 758...
 		SCREEN_Y_RES=1024
 		EIPS_X_RES=16
 		EIPS_Y_RES=24		# Manually mesured, should be accurate.
+	;;
+	"C6" | "DD" )
+		# KT2...
+		SCREEN_X_RES=608
+		SCREEN_Y_RES=800
+		EIPS_X_RES=16
+		EIPS_Y_RES=24
+	;;
+	"0F" | "11" | "10" | "12" )
+		# Touch
+		SCREEN_X_RES=600	# _v_width @ upstart/functions
+		SCREEN_Y_RES=800	# _v_height @ upstart/functions
+		EIPS_X_RES=12		# from f_puts @ upstart/functions
+		EIPS_Y_RES=20		# from f_puts @ upstart/functions
 	;;
 	* )
 		# Handle legacy devices...
@@ -29,11 +50,38 @@ case "${kmodel}" in
 			#. /etc/rc.d/functions
 			echo "foo" >/dev/null
 		else
-			# Touch
-			SCREEN_X_RES=600	# _v_width @ upstart/functions
-			SCREEN_Y_RES=800	# _v_height @ upstart/functions
-			EIPS_X_RES=12		# from f_puts @ upstart/functions
-			EIPS_Y_RES=20		# from f_puts @ upstart/functions
+			# Try the new device ID scheme...
+			kmodel="$(cut -c4-6 /proc/usid)"
+			case "${kmodel}" in
+				"0G1" | "0G2" | "0G4" | "0G5" | "0G6" | "0G7" | "0KB" | "0KC" | "0KD" | "0KE" | "0KF" | "0KG" )
+					# PW3... NOTE: Hopefully matches the KV...
+					SCREEN_X_RES=1088
+					SCREEN_Y_RES=1448
+					EIPS_X_RES=16
+					EIPS_Y_RES=24
+				;;
+				"0GC" | "0GD" | "0GP" | "0GQ" | "0GR" | "0GS" )
+					# Oasis... NOTE: Hopefully matches the KV...
+					SCREEN_X_RES=1088
+					SCREEN_Y_RES=1448
+					EIPS_X_RES=16
+					EIPS_Y_RES=24
+				;;
+				"0DT" | "0K9" | "0KA" )
+					# KT3... NOTE: Hopefully matches the KT2...
+					SCREEN_X_RES=608
+					SCREEN_Y_RES=800
+					EIPS_X_RES=16
+					EIPS_Y_RES=24
+				;;
+				* )
+					# Fallback... We shouldn't ever hit that.
+					SCREEN_X_RES=600
+					SCREEN_Y_RES=800
+					EIPS_X_RES=12
+					EIPS_Y_RES=20
+				;;
+			esac
 		fi
 	;;
 esac

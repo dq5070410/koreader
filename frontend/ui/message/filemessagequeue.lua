@@ -1,10 +1,7 @@
 local ffi = require("ffi")
-local DEBUG = require("dbg")
-local util = require("ffi/util")
-local Event = require("ui/event")
+local logger = require("logger")
 local MessageQueue = require("ui/message/messagequeue")
-
-local dummy = require("ffi/zeromq_h")
+local _ = require("ffi/zeromq_h")
 local czmq = ffi.load("libs/libczmq.so.1")
 local filemq = ffi.load("libs/libfmq.so.1")
 
@@ -29,11 +26,11 @@ end
 
 function FileMessageQueue:stop()
     if self.client ~= nil then
-        DEBUG("stop filemq client")
+        logger.dbg("stop filemq client")
         filemq.fmq_client_destroy(ffi.new('fmq_client_t *[1]', self.client))
     end
     if self.server ~= nil then
-        DEBUG("stop filemq server")
+        logger.dbg("stop filemq server")
         filemq.fmq_server_destroy(ffi.new('fmq_server_t *[1]', self.server))
     end
     if self.poller ~= nil then

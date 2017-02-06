@@ -5,7 +5,6 @@ local UIManager = require("ui/uimanager")
 local Device = require("device")
 local GestureRange = require("ui/gesturerange")
 local Math = require("optmath")
-local DEBUG = require("dbg")
 
 --[[
 BBoxWidget shows a bbox for page cropping
@@ -15,11 +14,11 @@ local BBoxWidget = InputContainer:new{
     screen_bbox = nil,
     linesize = 2,
     fine_factor = 10,
+    dimen = Geom:new(),
 }
 
 function BBoxWidget:init()
     self.page_bbox = self.document:getPageBBox(self.view.state.page)
-    --DEBUG("used page bbox on page", self.view.state.page, self.page_bbox)
     if Device:isTouchDevice() then
         self.ges_events = {
             TapAdjust = {
@@ -55,6 +54,9 @@ function BBoxWidget:getSize()
 end
 
 function BBoxWidget:paintTo(bb, x, y)
+    self.dimen = self.view.dimen:copy()
+    self.dimen.x, self.dimen.y = x, y
+
     -- As getScreenBBox uses view states, screen_bbox initialization is postponed.
     self.screen_bbox = self.screen_bbox or self:getScreenBBox(self.page_bbox)
     local bbox = self.screen_bbox
@@ -73,7 +75,6 @@ function BBoxWidget:getScreenBBox(page_bbox)
     local bbox = {}
     local scale = self.view.state.zoom
     local screen_offset = self.view.state.offset
-    --DEBUG("screen offset in page_to_screen", screen_offset)
     bbox.x0 = Math.round(page_bbox.x0 * scale + screen_offset.x)
     bbox.y0 = Math.round(page_bbox.y0 * scale + screen_offset.y)
     bbox.x1 = Math.round(page_bbox.x1 * scale + screen_offset.x)
@@ -86,7 +87,6 @@ function BBoxWidget:getPageBBox(screen_bbox)
     local bbox = {}
     local scale = self.view.state.zoom
     local screen_offset = self.view.state.offset
-    --DEBUG("screen offset in screen_to_page", screen_offset)
     bbox.x0 = Math.round((screen_bbox.x0 - screen_offset.x) / scale)
     bbox.y0 = Math.round((screen_bbox.y0 - screen_offset.y) / scale)
     bbox.x1 = Math.round((screen_bbox.x1 - screen_offset.x) / scale)
@@ -102,7 +102,6 @@ function BBoxWidget:inPageArea(ges)
 end
 
 function BBoxWidget:adjustScreenBBox(ges, relative)
-    --DEBUG("adjusting crop bbox with pos", ges.pos)
     if not self:inPageArea(ges) then return end
     local bbox = self.screen_bbox
     local upper_left = Geom:new{ x = bbox.x0, y = bbox.y0}
@@ -121,7 +120,6 @@ function BBoxWidget:adjustScreenBBox(ges, relative)
     local _, nearest = Math.tmin(anchors, function(a,b)
         return a:distance(ges.pos) > b:distance(ges.pos)
     end)
-    --DEBUG("nearest anchor", nearest)
     if nearest == upper_left then
         upper_left.x = ges.pos.x
         upper_left.y = ges.pos.y
@@ -190,7 +188,7 @@ function BBoxWidget:adjustScreenBBox(ges, relative)
         y1 = Math.round(bottom_right.y)
     }
 
-    UIManager.repaint_all = true
+    UIManager:setDirty("all")
 end
 
 function BBoxWidget:getModifiedPageBBox()
